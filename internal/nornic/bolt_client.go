@@ -165,7 +165,10 @@ MERGE (c:Commit {hash: row.commit_hash})
 ON CREATE SET c.timestamp = datetime(row.timestamp_iso), c.tx_id = row.tx_id, c.actor = row.actor
 MERGE (c)-[:EMITTED]->(cc)
 WITH cc, row
-MATCH (cs:CodeState {state_id: row.affected_state_id})
+OPTIONAL MATCH (csByID:CodeState {state_id: row.affected_state_id})
+OPTIONAL MATCH (csByKey:CodeState {code_key: row.affected_code_key, tx_id: row.tx_id})
+WITH cc, coalesce(csByID, csByKey) AS cs
+WHERE cs IS NOT NULL
 MERGE (cc)-[:IMPACTS]->(cs)`
 	const qEventRow = `MERGE (cc:CodeChange {change_id: $change_id})
 SET cc.tx_id = $tx_id,
@@ -176,7 +179,10 @@ SET cc.tx_id = $tx_id,
 MERGE (c:Commit {hash: $commit_hash})
 ON CREATE SET c.timestamp = datetime($timestamp_iso), c.tx_id = $tx_id, c.actor = $actor
 MERGE (c)-[:EMITTED]->(cc)
-MATCH (cs:CodeState {state_id: $affected_state_id})
+OPTIONAL MATCH (csByID:CodeState {state_id: $affected_state_id})
+OPTIONAL MATCH (csByKey:CodeState {code_key: $affected_code_key, tx_id: $tx_id})
+WITH cc, coalesce(csByID, csByKey) AS cs
+WHERE cs IS NOT NULL
 MERGE (cc)-[:IMPACTS]->(cs)`
 
 	for i := 0; i < len(events); i += batch {
@@ -198,6 +204,7 @@ MERGE (cc)-[:IMPACTS]->(cs)`
 				"op_type":           ev.OpType,
 				"commit_hash":       ev.CommitHash,
 				"affected_state_id": affectedStateID,
+				"affected_code_key": ev.AffectedCode,
 			})
 		}
 		stmtCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -236,6 +243,34 @@ MERGE (cc)-[:IMPACTS]->(cs)`
 		done += len(rows)
 		if progress != nil {
 			progress(done, total, "events")
+		}
+	}
+
+	if len(events) > 0 {
+		checkCtx, checkCancel := context.WithTimeout(ctx, timeout)
+		defer checkCancel()
+		res, err := session.ExecuteRead(checkCtx, func(tx neo4j.ManagedTransaction) (any, error) {
+			r, runErr := tx.Run(checkCtx, "MATCH (:CodeChange)-[:IMPACTS]->(:CodeState) RETURN count(*) AS c", nil)
+			if runErr != nil {
+				return nil, runErr
+			}
+			if !r.Next(checkCtx) {
+				if r.Err() != nil {
+					return nil, r.Err()
+				}
+				return int64(0), nil
+			}
+			v, _ := r.Record().Get("c")
+			if c, ok := v.(int64); ok {
+				return c, nil
+			}
+			return int64(0), nil
+		})
+		if err != nil {
+			return done, err
+		}
+		if c, _ := res.(int64); c == 0 {
+			return done, fmt.Errorf("apply validation failed: no CodeChange-[:IMPACTS]->CodeState edges were created")
 		}
 	}
 
