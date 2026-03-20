@@ -2,6 +2,8 @@ package nornic
 
 import (
 	"bufio"
+	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -43,31 +45,23 @@ func writeVersionBatches(path string, versions []ledger.FactVersion, batch int) 
 	w := bufio.NewWriter(f)
 	defer w.Flush()
 
-	fmt.Fprintln(w, "// Batched canonical fact-version upserts for NornicDB")
+	fmt.Fprintln(w, "// Canonical fact-version upserts for NornicDB")
 	fmt.Fprintln(w, "// Run canonical-bootstrap.cypher first")
-	for i := 0; i < len(versions); i += batch {
-		end := i + batch
-		if end > len(versions) {
-			end = len(versions)
+	_ = batch
+	for _, v := range versions {
+		validFromISO := v.ValidFrom.UTC().Format("2006-01-02T15:04:05Z")
+		validToExpr := "null"
+		if v.ValidTo != nil {
+			validToExpr = fmt.Sprintf("datetime('%s')", v.ValidTo.UTC().Format("2006-01-02T15:04:05Z"))
 		}
-		chunk := versions[i:end]
-		fmt.Fprintln(w, "UNWIND [")
-		for idx, v := range chunk {
-			comma := ","
-			if idx == len(chunk)-1 {
-				comma = ""
-			}
-			validTo := "null"
-			if v.ValidTo != nil {
-				validTo = fmt.Sprintf("datetime('%s')", v.ValidTo.UTC().Format("2006-01-02T15:04:05Z"))
-			}
-			fmt.Fprintf(w, "  {fact_key: '%s', value_json: '%s', valid_from: datetime('%s'), valid_to: %s, asserted_at: datetime('%s'), asserted_by: '%s', tx_id: '%s', commit_hash: '%s'}%s\n",
-				esc(v.FactKey), esc(v.ValueJSON), v.ValidFrom.UTC().Format("2006-01-02T15:04:05Z"), validTo, v.AssertedAt.UTC().Format("2006-01-02T15:04:05Z"), esc(v.AssertedBy), esc(v.TxID), esc(v.CommitHash), comma)
-		}
-		fmt.Fprintln(w, "] AS row")
-		fmt.Fprintln(w, "MERGE (fk:FactKey {subject_entity_id: split(row.fact_key,'|')[2], predicate: split(row.fact_key,'|')[1]})")
-		fmt.Fprintln(w, "CREATE (fv:FactVersion {fact_key: row.fact_key, value_json: row.value_json, valid_from: row.valid_from, valid_to: row.valid_to, asserted_at: row.asserted_at, asserted_by: row.asserted_by, tx_id: row.tx_id, commit_hash: row.commit_hash})")
-		fmt.Fprintln(w, "MERGE (fk)-[:HAS_VERSION]->(fv);")
+		versionID := factVersionID(v)
+		subjectID, predicate := factKeyParts(v.FactKey)
+		fmt.Fprintf(w, "MERGE (:FactKey {subject_entity_id: '%s', predicate: '%s'});\n", esc(subjectID), esc(predicate))
+		// Keep MERGE patterns as plain literal key/value lookups for parser compatibility.
+		fmt.Fprintf(w, "MERGE (:FactVersion {version_id: '%s'}) SET fact_key = '%s', tx_id = '%s', commit_hash = '%s', valid_from_iso = '%s', valid_from = datetime('%s'), value_json = '%s', valid_to = %s, asserted_at = datetime('%s'), asserted_by = '%s';\n",
+			esc(versionID), esc(v.FactKey), esc(v.TxID), esc(v.CommitHash), validFromISO, validFromISO, esc(v.ValueJSON), validToExpr, v.AssertedAt.UTC().Format("2006-01-02T15:04:05Z"), esc(v.AssertedBy))
+		fmt.Fprintf(w, "MATCH (fk:FactKey {subject_entity_id: '%s', predicate: '%s'}) MATCH (fv:FactVersion {version_id: '%s'}) MERGE (fk)-[:HAS_VERSION]->(fv);\n",
+			esc(subjectID), esc(predicate), esc(versionID))
 	}
 	return nil
 }
@@ -82,26 +76,12 @@ func writeEventBatches(path string, events []ledger.MutationEvent, batch int) er
 	defer w.Flush()
 
 	fmt.Fprintln(w, "// Mutation events aligned to ledger versions")
-	for i := 0; i < len(events); i += batch {
-		end := i + batch
-		if end > len(events) {
-			end = len(events)
-		}
-		chunk := events[i:end]
-		fmt.Fprintln(w, "UNWIND [")
-		for idx, ev := range chunk {
-			comma := ","
-			if idx == len(chunk)-1 {
-				comma = ""
-			}
-			fmt.Fprintf(w, "  {event_id: '%s', tx_id: '%s', actor: '%s', ts: datetime('%s'), op_type: '%s', commit_hash: '%s', affected_fact: '%s'}%s\n",
-				esc(ev.EventID), esc(ev.TxID), esc(ev.Actor), ev.Timestamp.UTC().Format("2006-01-02T15:04:05Z"), esc(ev.OpType), esc(ev.CommitHash), esc(ev.AffectedFact), comma)
-		}
-		fmt.Fprintln(w, "] AS row")
-		fmt.Fprintln(w, "CREATE (me:MutationEvent {event_id: row.event_id, tx_id: row.tx_id, actor: row.actor, timestamp: row.ts, op_type: row.op_type, commit_hash: row.commit_hash})")
-		fmt.Fprintln(w, "WITH me, row")
-		fmt.Fprintln(w, "MATCH (fv:FactVersion {fact_key: row.affected_fact, tx_id: row.tx_id})")
-		fmt.Fprintln(w, "MERGE (me)-[:AFFECTS]->(fv);")
+	_ = batch
+	for _, ev := range events {
+		fmt.Fprintf(w, "MERGE (:MutationEvent {event_id: '%s'}) SET tx_id = '%s', actor = '%s', timestamp = datetime('%s'), op_type = '%s', commit_hash = '%s';\n",
+			esc(ev.EventID), esc(ev.TxID), esc(ev.Actor), ev.Timestamp.UTC().Format("2006-01-02T15:04:05Z"), esc(ev.OpType), esc(ev.CommitHash))
+		fmt.Fprintf(w, "MATCH (me:MutationEvent {event_id: '%s'}) MATCH (fv:FactVersion {fact_key: '%s', tx_id: '%s'}) MERGE (me)-[:AFFECTS]->(fv);\n",
+			esc(ev.EventID), esc(ev.AffectedFact), esc(ev.TxID))
 	}
 	return nil
 }
@@ -123,4 +103,22 @@ func esc(v string) string {
 	v = strings.ReplaceAll(v, "\n", "\\n")
 	v = strings.ReplaceAll(v, "\r", "")
 	return v
+}
+
+func factKeyParts(factKey string) (subjectID, predicate string) {
+	parts := strings.Split(factKey, "|")
+	if len(parts) >= 3 {
+		return parts[2], parts[1]
+	}
+	if len(parts) == 2 {
+		return parts[1], parts[0]
+	}
+	return factKey, "unknown"
+}
+
+func factVersionID(v ledger.FactVersion) string {
+	validFromISO := v.ValidFrom.UTC().Format("2006-01-02T15:04:05Z")
+	payload := strings.Join([]string{v.FactKey, v.TxID, v.CommitHash, validFromISO}, "|")
+	sum := sha1.Sum([]byte(payload))
+	return "fv-" + hex.EncodeToString(sum[:])
 }

@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -17,13 +18,23 @@ import (
 )
 
 type Config struct {
-	RepoPath      string
-	OutDir        string
-	BatchSize     int
-	From          string
-	To            string
-	ParserBackend string
-	Stdout        io.Writer
+	RepoPath          string
+	OutDir            string
+	BatchSize         int
+	From              string
+	To                string
+	ParserBackend     string
+	ApplyToDB         bool
+	DBTransport       string
+	BoltURI           string
+	DBURL             string
+	DBUser            string
+	DBPassword        string
+	DBToken           string
+	DBDatabase        string
+	BootstrapCypher   string
+	ContinueOnDBError bool
+	Stdout            io.Writer
 }
 
 type Indexer struct {
@@ -86,6 +97,10 @@ func (i *Indexer) Run() error {
 				if !isCodeFile(ch.Path) {
 					continue
 				}
+				ignored, err := gr.IsIgnored(ch.Path)
+				if err == nil && ignored {
+					continue
+				}
 				content, err := gr.FileAtCommit(hash, ch.Path)
 				if err != nil {
 					continue
@@ -108,11 +123,26 @@ func (i *Indexer) Run() error {
 	}
 	reporter.Complete("commit replay complete")
 
-	if err := os.MkdirAll(i.cfg.OutDir, 0o755); err != nil {
-		return err
+	artifactDir := i.cfg.OutDir
+	cleanupArtifacts := false
+	if i.cfg.ApplyToDB {
+		tmpDir, err := os.MkdirTemp("", "g2g-artifacts-")
+		if err != nil {
+			return err
+		}
+		artifactDir = tmpDir
+		cleanupArtifacts = true
+	} else {
+		if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+			return err
+		}
 	}
-	ledgerVersionsPath := filepath.Join(i.cfg.OutDir, "ledger_versions.jsonl")
-	ledgerEventsPath := filepath.Join(i.cfg.OutDir, "mutation_events.jsonl")
+	if cleanupArtifacts {
+		defer os.RemoveAll(artifactDir)
+	}
+
+	ledgerVersionsPath := filepath.Join(artifactDir, "ledger_versions.jsonl")
+	ledgerEventsPath := filepath.Join(artifactDir, "mutation_events.jsonl")
 
 	reporter.StartPhase("write_ledger", 2)
 	if err := ledger.WriteJSONL(ledgerVersionsPath, led.Versions()); err != nil {
@@ -126,12 +156,54 @@ func (i *Indexer) Run() error {
 	reporter.Complete("jsonl artifacts complete")
 
 	reporter.StartPhase("export_nornic", 1)
-	ex := nornic.Exporter{OutDir: i.cfg.OutDir, BatchSize: i.cfg.BatchSize}
+	ex := nornic.Exporter{OutDir: artifactDir, BatchSize: i.cfg.BatchSize}
 	if err := ex.Write(led.Versions(), led.Events()); err != nil {
 		return err
 	}
 	reporter.Tick("nornic cypher")
 	reporter.Complete("nornic export complete")
+
+	if i.cfg.ApplyToDB {
+		reporter.StartPhase("apply_nornic", 1)
+		cypherFiles := make([]string, 0, 3)
+		if strings.TrimSpace(i.cfg.BootstrapCypher) != "" {
+			cypherFiles = append(cypherFiles, i.cfg.BootstrapCypher)
+		}
+		cypherFiles = append(cypherFiles,
+			filepath.Join(artifactDir, "nornic_versions.cypher"),
+			filepath.Join(artifactDir, "nornic_events.cypher"),
+		)
+		transport := strings.ToLower(strings.TrimSpace(i.cfg.DBTransport))
+		if transport == "" {
+			transport = "bolt"
+		}
+		var count int
+		if transport == "graphql" {
+			client := nornic.NewGraphQLClient(nornic.GraphQLConfig{
+				URL:             i.cfg.DBURL,
+				User:            i.cfg.DBUser,
+				Password:        i.cfg.DBPassword,
+				Token:           i.cfg.DBToken,
+				Database:        i.cfg.DBDatabase,
+				ContinueOnError: i.cfg.ContinueOnDBError,
+			})
+			count, err = nornic.ApplyCypherFiles(context.Background(), client, cypherFiles)
+		} else {
+			count, err = nornic.ApplyCypherFilesBolt(context.Background(), nornic.BoltConfig{
+				URI:             i.cfg.BoltURI,
+				User:            i.cfg.DBUser,
+				Password:        i.cfg.DBPassword,
+				Token:           i.cfg.DBToken,
+				Database:        i.cfg.DBDatabase,
+				ContinueOnError: i.cfg.ContinueOnDBError,
+			}, cypherFiles)
+		}
+		if err != nil {
+			return err
+		}
+		reporter.Tick(fmt.Sprintf("statements=%d", count))
+		reporter.Complete("nornic apply complete")
+	}
 
 	reporter.Info("Summary:")
 	reporter.Info(fmt.Sprintf("  commits: %d", len(commits)))
@@ -139,7 +211,16 @@ func (i *Indexer) Run() error {
 	reporter.Info(fmt.Sprintf("  fact versions: %d", len(led.Versions())))
 	reporter.Info(fmt.Sprintf("  mutation events: %d", len(led.Events())))
 	reporter.Info(fmt.Sprintf("  unresolved calls: %d", unresolvedCalls))
-	reporter.Info(fmt.Sprintf("  output: %s", i.cfg.OutDir))
+	if !i.cfg.ApplyToDB {
+		reporter.Info(fmt.Sprintf("  output: %s", i.cfg.OutDir))
+	}
+	if i.cfg.ApplyToDB {
+		target := i.cfg.DBURL
+		if strings.ToLower(strings.TrimSpace(i.cfg.DBTransport)) != "graphql" {
+			target = i.cfg.BoltURI
+		}
+		reporter.Info(fmt.Sprintf("  applied to db: %s", target))
+	}
 	return nil
 }
 

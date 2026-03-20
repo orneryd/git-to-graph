@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -100,19 +101,30 @@ func scipSupportedAndInstalled(lang string) bool {
 	return err == nil
 }
 
-func parseTreeSitter(path, content, lang string) (model.FileGraph, bool) {
-	fg := model.FileGraph{Path: path, Lang: lang}
+func parseTreeSitter(path, content, lang string) (fg model.FileGraph, ok bool) {
+	fg = model.FileGraph{Path: path, Lang: lang}
+	defer func() {
+		if recover() != nil {
+			fg = model.FileGraph{}
+			ok = false
+		}
+	}()
+
 	langSpec := languageFor(lang)
 	if langSpec == nil {
 		return model.FileGraph{}, false
 	}
 
 	p := sitter.NewParser()
+	if p == nil {
+		return model.FileGraph{}, false
+	}
 	p.SetLanguage(langSpec)
-	tree, err := p.ParseCtx(nil, nil, []byte(content))
+	tree, err := p.ParseCtx(context.TODO(), nil, []byte(content))
 	if err != nil || tree == nil {
 		return model.FileGraph{}, false
 	}
+	defer tree.Close()
 	root := tree.RootNode()
 	walkTree(root, []byte(content), func(n *sitter.Node) {
 		t := n.Type()

@@ -131,6 +131,25 @@ func (r *Reader) FileAtCommit(hash, path string) (string, error) {
 	return out, nil
 }
 
+func (r *Reader) IsIgnored(path string) (bool, error) {
+	clean := strings.TrimSpace(path)
+	if clean == "" {
+		return false, nil
+	}
+	cmd := exec.Command("git", "check-ignore", "--quiet", "--", clean)
+	cmd.Dir = r.repoPath
+	err := cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+	if ee, ok := err.(*exec.ExitError); ok {
+		if ee.ExitCode() == 1 {
+			return false, nil
+		}
+	}
+	return false, err
+}
+
 func (r *Reader) run(args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = r.repoPath

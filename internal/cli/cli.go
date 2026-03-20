@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/c815719/git-to-graph/internal/indexer"
@@ -34,29 +35,64 @@ func Run(args []string, stdout, stderr io.Writer) error {
 
 func runIndex(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("index", flag.ContinueOnError)
-	repo := fs.String("repo", ".", "Path to git repository to index")
 	outDir := fs.String("out", "./.git2graph", "Output directory for ledger artifacts")
 	batchSize := fs.Int("batch-size", 500, "NornicDB write batch size")
 	from := fs.String("from", "", "Optional start commit (inclusive)")
 	to := fs.String("to", "", "Optional end commit (inclusive)")
 	parserBackend := fs.String("parser-backend", "auto", "Parser backend: auto|scip|tree-sitter|regex")
+	dbURI := fs.String("db-uri", "bolt://localhost:7687", "DB URI. Examples: bolt://localhost:7687 or http://localhost:7474/graphql")
+	dbUser := fs.String("db-user", "admin", "NornicDB username for basic auth")
+	dbPassword := fs.String("db-password", "password", "NornicDB password for basic auth")
+	dbToken := fs.String("db-token", "", "NornicDB bearer token")
+	dbDatabase := fs.String("db-database", "", "Optional NornicDB database name")
+	bootstrapCypher := fs.String("bootstrap-cypher", "", "Optional bootstrap Cypher file to run before inserts")
+	continueOnDBError := fs.Bool("continue-on-db-error", false, "Continue applying remaining statements when one fails")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	absRepo, err := filepath.Abs(*repo)
+	repoArg := "."
+	if rest := fs.Args(); len(rest) > 0 {
+		repoArg = rest[0]
+	}
+	absRepo, err := filepath.Abs(repoArg)
 	if err != nil {
 		return err
 	}
 
+	transport := ""
+	applyToDB := false
+	bURI := ""
+	gqlURL := ""
+	if v := *dbURI; v != "" {
+		applyToDB = true
+		if isBoltURI(v) {
+			transport = "bolt"
+			bURI = v
+		} else {
+			transport = "graphql"
+			gqlURL = v
+		}
+	}
+
 	cfg := indexer.Config{
-		RepoPath:      absRepo,
-		OutDir:        *outDir,
-		BatchSize:     *batchSize,
-		From:          *from,
-		To:            *to,
-		ParserBackend: *parserBackend,
-		Stdout:        stdout,
+		RepoPath:          absRepo,
+		OutDir:            *outDir,
+		BatchSize:         *batchSize,
+		From:              *from,
+		To:                *to,
+		ParserBackend:     *parserBackend,
+		ApplyToDB:         applyToDB,
+		DBTransport:       transport,
+		BoltURI:           bURI,
+		DBURL:             gqlURL,
+		DBUser:            *dbUser,
+		DBPassword:        *dbPassword,
+		DBToken:           *dbToken,
+		DBDatabase:        *dbDatabase,
+		BootstrapCypher:   *bootstrapCypher,
+		ContinueOnDBError: *continueOnDBError,
+		Stdout:            stdout,
 	}
 
 	idx := indexer.New(cfg)
@@ -86,9 +122,14 @@ func runAsOf(args []string, stdout io.Writer) error {
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprintln(w, "git-to-graph: canonical temporal graph ledger builder")
+	fmt.Fprintln(w, "g2g: canonical temporal graph ledger builder")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  index    Read git history and build canonical temporal ledger artifacts")
 	fmt.Fprintln(w, "  asof     Reconstruct graph state from ledger as of a timestamp")
+}
+
+func isBoltURI(v string) bool {
+	v = strings.ToLower(strings.TrimSpace(v))
+	return strings.HasPrefix(v, "bolt://") || strings.HasPrefix(v, "neo4j://")
 }
