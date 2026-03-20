@@ -27,6 +27,13 @@ type GraphQLClient struct {
 	http *http.Client
 }
 
+type ApplyProgressFunc func(done, total int, file string)
+
+type statementTask struct {
+	File      string
+	Statement string
+}
+
 func NewGraphQLClient(cfg GraphQLConfig) *GraphQLClient {
 	if cfg.URL == "" {
 		cfg.URL = "http://localhost:7474/graphql"
@@ -124,29 +131,57 @@ func (c *GraphQLClient) ExecuteCypher(ctx context.Context, statement string, par
 	return ExecuteResult{Rows: out.Data.ExecuteCypher.RowCount}, nil
 }
 
-func ApplyCypherFiles(ctx context.Context, client *GraphQLClient, paths []string) (int, error) {
-	total := 0
+func ApplyCypherFiles(ctx context.Context, client *GraphQLClient, paths []string, progress ApplyProgressFunc) (int, error) {
+	tasks, err := buildStatementTasks(paths)
+	if err != nil {
+		return 0, err
+	}
+	total := len(tasks)
+	done := 0
+	for _, task := range tasks {
+		if _, err := client.ExecuteCypher(ctx, task.Statement, nil); err != nil {
+			if client.cfg.ContinueOnError {
+				done++
+				if progress != nil {
+					progress(done, total, task.File)
+				}
+				continue
+			}
+			return done, fmt.Errorf("execute statement from %s: %w", task.File, err)
+		}
+		done++
+		if progress != nil {
+			progress(done, total, task.File)
+		}
+	}
+	return done, nil
+}
+
+func buildStatementTasks(paths []string) ([]statementTask, error) {
+	tasks := make([]statementTask, 0, 256)
 	for _, p := range paths {
 		buf, err := os.ReadFile(p)
 		if err != nil {
-			return total, err
+			return nil, err
 		}
 		stmts := splitCypherStatements(string(buf))
 		for _, stmt := range stmts {
-			if strings.TrimSpace(stmt) == "" {
+			stmt = strings.TrimSpace(stmt)
+			if stmt == "" {
 				continue
 			}
-			if _, err := client.ExecuteCypher(ctx, stmt, nil); err != nil {
-				if client.cfg.ContinueOnError {
-					total++
-					continue
-				}
-				return total, fmt.Errorf("execute statement from %s: %w", p, err)
-			}
-			total++
+			tasks = append(tasks, statementTask{File: p, Statement: stmt})
 		}
 	}
-	return total, nil
+	return tasks, nil
+}
+
+func CountStatements(paths []string) (int, error) {
+	tasks, err := buildStatementTasks(paths)
+	if err != nil {
+		return 0, err
+	}
+	return len(tasks), nil
 }
 
 func splitCypherStatements(v string) []string {

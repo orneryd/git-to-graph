@@ -48,6 +48,7 @@ func writeVersionBatches(path string, versions []ledger.FactVersion, batch int) 
 	fmt.Fprintln(w, "// Canonical fact-version upserts for NornicDB")
 	fmt.Fprintln(w, "// Run canonical-bootstrap.cypher first")
 	_ = batch
+	lastVersionByFactKey := map[string]string{}
 	for _, v := range versions {
 		validFromISO := v.ValidFrom.UTC().Format("2006-01-02T15:04:05Z")
 		validToExpr := "null"
@@ -56,12 +57,25 @@ func writeVersionBatches(path string, versions []ledger.FactVersion, batch int) 
 		}
 		versionID := factVersionID(v)
 		subjectID, predicate := factKeyParts(v.FactKey)
-		fmt.Fprintf(w, "MERGE (:FactKey {subject_entity_id: '%s', predicate: '%s'});\n", esc(subjectID), esc(predicate))
+		keyLabel, versionLabel := semanticLabels(predicate)
+		fmt.Fprintf(w, "MERGE (:FactKey:%s {subject_entity_id: '%s', predicate: '%s'});\n", keyLabel, esc(subjectID), esc(predicate))
 		// Keep MERGE patterns as plain literal key/value lookups for parser compatibility.
-		fmt.Fprintf(w, "MERGE (:FactVersion {version_id: '%s'}) SET fact_key = '%s', tx_id = '%s', commit_hash = '%s', valid_from_iso = '%s', valid_from = datetime('%s'), value_json = '%s', valid_to = %s, asserted_at = datetime('%s'), asserted_by = '%s';\n",
-			esc(versionID), esc(v.FactKey), esc(v.TxID), esc(v.CommitHash), validFromISO, validFromISO, esc(v.ValueJSON), validToExpr, v.AssertedAt.UTC().Format("2006-01-02T15:04:05Z"), esc(v.AssertedBy))
+		fmt.Fprintf(w, "MERGE (:FactVersion:%s {version_id: '%s'}) SET fact_key = '%s', tx_id = '%s', commit_hash = '%s', valid_from_iso = '%s', valid_from = datetime('%s'), value_json = '%s', valid_to = %s, asserted_at = datetime('%s'), asserted_by = '%s', semantic_type = '%s';\n",
+			esc(versionLabel),
+			esc(versionID), esc(v.FactKey), esc(v.TxID), esc(v.CommitHash), validFromISO, validFromISO, esc(v.ValueJSON), validToExpr, v.AssertedAt.UTC().Format("2006-01-02T15:04:05Z"), esc(v.AssertedBy), esc(versionLabel))
 		fmt.Fprintf(w, "MATCH (fk:FactKey {subject_entity_id: '%s', predicate: '%s'}) MATCH (fv:FactVersion {version_id: '%s'}) MERGE (fk)-[:HAS_VERSION]->(fv);\n",
 			esc(subjectID), esc(predicate), esc(versionID))
+		fmt.Fprintf(w, "MERGE (:Commit {hash: '%s'}) SET timestamp = datetime('%s'), tx_id = '%s', actor = '%s';\n",
+			esc(v.CommitHash), v.AssertedAt.UTC().Format("2006-01-02T15:04:05Z"), esc(v.TxID), esc(v.AssertedBy))
+		fmt.Fprintf(w, "MATCH (c:Commit {hash: '%s'}) MATCH (fv:FactVersion {version_id: '%s'}) MERGE (c)-[:CHANGED]->(fv);\n",
+			esc(v.CommitHash), esc(versionID))
+		fmt.Fprintf(w, "MATCH (c:Commit {hash: '%s'}) MATCH (fk:FactKey {subject_entity_id: '%s', predicate: '%s'}) MERGE (c)-[:TOUCHED_KEY]->(fk);\n",
+			esc(v.CommitHash), esc(subjectID), esc(predicate))
+		if prevVersionID, ok := lastVersionByFactKey[v.FactKey]; ok {
+			fmt.Fprintf(w, "MATCH (prev:FactVersion {version_id: '%s'}) MATCH (curr:FactVersion {version_id: '%s'}) MERGE (prev)-[:SUPERSEDED_BY]->(curr);\n",
+				esc(prevVersionID), esc(versionID))
+		}
+		lastVersionByFactKey[v.FactKey] = versionID
 	}
 	return nil
 }
@@ -80,6 +94,10 @@ func writeEventBatches(path string, events []ledger.MutationEvent, batch int) er
 	for _, ev := range events {
 		fmt.Fprintf(w, "MERGE (:MutationEvent {event_id: '%s'}) SET tx_id = '%s', actor = '%s', timestamp = datetime('%s'), op_type = '%s', commit_hash = '%s';\n",
 			esc(ev.EventID), esc(ev.TxID), esc(ev.Actor), ev.Timestamp.UTC().Format("2006-01-02T15:04:05Z"), esc(ev.OpType), esc(ev.CommitHash))
+		fmt.Fprintf(w, "MERGE (:Commit {hash: '%s'}) SET timestamp = datetime('%s'), tx_id = '%s', actor = '%s';\n",
+			esc(ev.CommitHash), ev.Timestamp.UTC().Format("2006-01-02T15:04:05Z"), esc(ev.TxID), esc(ev.Actor))
+		fmt.Fprintf(w, "MATCH (c:Commit {hash: '%s'}) MATCH (me:MutationEvent {event_id: '%s'}) MERGE (c)-[:EMITTED]->(me);\n",
+			esc(ev.CommitHash), esc(ev.EventID))
 		fmt.Fprintf(w, "MATCH (me:MutationEvent {event_id: '%s'}) MATCH (fv:FactVersion {fact_key: '%s', tx_id: '%s'}) MERGE (me)-[:AFFECTS]->(fv);\n",
 			esc(ev.EventID), esc(ev.AffectedFact), esc(ev.TxID))
 	}
@@ -121,4 +139,21 @@ func factVersionID(v ledger.FactVersion) string {
 	payload := strings.Join([]string{v.FactKey, v.TxID, v.CommitHash, validFromISO}, "|")
 	sum := sha1.Sum([]byte(payload))
 	return "fv-" + hex.EncodeToString(sum[:])
+}
+
+func semanticLabels(predicate string) (keyLabel, versionLabel string) {
+	switch strings.ToLower(strings.TrimSpace(predicate)) {
+	case "file":
+		return "CodeFileKey", "CodeFileVersion"
+	case "symbol":
+		return "CodeSymbolKey", "CodeSymbolVersion"
+	case "calls":
+		return "CallEdgeKey", "CallEdgeVersion"
+	case "contains":
+		return "ContainsEdgeKey", "ContainsEdgeVersion"
+	case "import":
+		return "ImportEdgeKey", "ImportEdgeVersion"
+	default:
+		return "CodeFactKey", "CodeFactVersion"
+	}
 }

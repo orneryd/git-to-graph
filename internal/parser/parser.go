@@ -2,11 +2,14 @@ package parser
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/c815719/git-to-graph/internal/model"
 	sitter "github.com/smacker/go-tree-sitter"
@@ -120,7 +123,9 @@ func parseTreeSitter(path, content, lang string) (fg model.FileGraph, ok bool) {
 		return model.FileGraph{}, false
 	}
 	p.SetLanguage(langSpec)
-	tree, err := p.ParseCtx(context.TODO(), nil, []byte(content))
+	ctx, cancel := context.WithTimeout(context.TODO(), parseTimeout())
+	defer cancel()
+	tree, err := p.ParseCtx(ctx, nil, []byte(content))
 	if err != nil || tree == nil {
 		return model.FileGraph{}, false
 	}
@@ -303,4 +308,17 @@ func getEnv(key, def string) string {
 		return def
 	}
 	return v
+}
+
+func parseTimeout() time.Duration {
+	v := strings.TrimSpace(os.Getenv("G2G_PARSE_TIMEOUT_MS"))
+	if v == "" {
+		return 1500 * time.Millisecond
+	}
+	ms, err := strconv.Atoi(v)
+	if err != nil || ms <= 0 {
+		_ = fmt.Sprintf("invalid G2G_PARSE_TIMEOUT_MS=%q", v)
+		return 1500 * time.Millisecond
+	}
+	return time.Duration(ms) * time.Millisecond
 }

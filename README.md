@@ -43,6 +43,13 @@ go build -o g2g ./cmd/g2g
 
 Direct DB apply is automatic by default.
 
+Before apply starts, `g2g` now auto-generates and runs a parser-safe bootstrap schema
+(`g2g-bootstrap.cypher`) that creates required indexes/constraints with `IF NOT EXISTS`.
+
+Note: `FactVersion(version_id)` is indexed (not unique-constrained) by default so startup
+does not fail on existing historical duplicate rows. For strict uniqueness, first clean
+duplicates, then add a unique constraint manually.
+
 Default connection values:
 
 - `--db-uri bolt://localhost:7687`

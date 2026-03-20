@@ -164,8 +164,12 @@ func (i *Indexer) Run() error {
 	reporter.Complete("nornic export complete")
 
 	if i.cfg.ApplyToDB {
-		reporter.StartPhase("apply_nornic", 1)
 		cypherFiles := make([]string, 0, 3)
+		autoBootstrapPath := filepath.Join(artifactDir, "g2g-bootstrap.cypher")
+		if err := nornic.WriteDefaultBootstrap(autoBootstrapPath); err != nil {
+			return err
+		}
+		cypherFiles = append(cypherFiles, autoBootstrapPath)
 		if strings.TrimSpace(i.cfg.BootstrapCypher) != "" {
 			cypherFiles = append(cypherFiles, i.cfg.BootstrapCypher)
 		}
@@ -173,12 +177,17 @@ func (i *Indexer) Run() error {
 			filepath.Join(artifactDir, "nornic_versions.cypher"),
 			filepath.Join(artifactDir, "nornic_events.cypher"),
 		)
+		stmtCount, err := nornic.CountStatements(cypherFiles)
+		if err != nil || stmtCount <= 0 {
+			stmtCount = 1
+		}
 		transport := strings.ToLower(strings.TrimSpace(i.cfg.DBTransport))
 		if transport == "" {
 			transport = "bolt"
 		}
 		var count int
 		if transport == "graphql" {
+			reporter.StartPhase("apply_nornic", stmtCount)
 			client := nornic.NewGraphQLClient(nornic.GraphQLConfig{
 				URL:             i.cfg.DBURL,
 				User:            i.cfg.DBUser,
@@ -187,16 +196,29 @@ func (i *Indexer) Run() error {
 				Database:        i.cfg.DBDatabase,
 				ContinueOnError: i.cfg.ContinueOnDBError,
 			})
-			count, err = nornic.ApplyCypherFiles(context.Background(), client, cypherFiles)
+			count, err = nornic.ApplyCypherFiles(context.Background(), client, cypherFiles, func(done, total int, _ string) {
+				if total > 0 {
+					reporter.Tick(fmt.Sprintf("%d/%d", done, total))
+				}
+			})
 		} else {
-			count, err = nornic.ApplyCypherFilesBolt(context.Background(), nornic.BoltConfig{
+			boltTotal := len(led.Versions()) + len(led.Events())
+			if boltTotal <= 0 {
+				boltTotal = 1
+			}
+			reporter.StartPhase("apply_nornic", boltTotal)
+			count, err = nornic.ApplyLedgerBolt(context.Background(), nornic.BoltConfig{
 				URI:             i.cfg.BoltURI,
 				User:            i.cfg.DBUser,
 				Password:        i.cfg.DBPassword,
 				Token:           i.cfg.DBToken,
 				Database:        i.cfg.DBDatabase,
 				ContinueOnError: i.cfg.ContinueOnDBError,
-			}, cypherFiles)
+			}, led.Versions(), led.Events(), func(done, total int, _ string) {
+				if total > 0 {
+					reporter.Tick(fmt.Sprintf("%d/%d", done, total))
+				}
+			})
 		}
 		if err != nil {
 			return err

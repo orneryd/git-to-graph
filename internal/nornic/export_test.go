@@ -49,7 +49,7 @@ func TestWriteVersionBatches_UsesParserSafeShapes(t *testing.T) {
 	if strings.Contains(content, "MERGE (:FactVersion {fact_key:") {
 		t.Fatalf("FactVersion MERGE should key on version_id only for parser compatibility:\n%s", content)
 	}
-	if !strings.Contains(content, "MERGE (:FactVersion {version_id: 'fv-") {
+	if !strings.Contains(content, "MERGE (:FactVersion:") || !strings.Contains(content, "{version_id: 'fv-") {
 		t.Fatalf("missing version_id-based MERGE:\n%s", content)
 	}
 	if !strings.Contains(content, "MATCH (fk:FactKey") || !strings.Contains(content, "MATCH (fv:FactVersion {version_id:") {
@@ -77,4 +77,3 @@ func TestFactVersionID_Deterministic(t *testing.T) {
 		t.Fatalf("expected fv- prefix, got %q", a)
 	}
 }
-
