@@ -17,9 +17,9 @@ func TestWriteVersionBatches_UsesParserSafeShapes(t *testing.T) {
 	path := filepath.Join(dir, "nornic_versions.cypher")
 	now := time.Date(2026, 3, 20, 20, 22, 20, 0, time.UTC)
 
-	versions := []ledger.FactVersion{
+	versions := []ledger.CodeState{
 		{
-			FactKey:    "repo_fact|calls|file::a.go->symbol::b.go::fn::C",
+			CodeKey:    "repo_fact|calls|file::a.go->symbol::b.go::fn::C",
 			ValueJSON:  `{"repo":"x","text":"Bob's {call} shape"}`,
 			ValidFrom:  now,
 			ValidTo:    nil,
@@ -46,34 +46,34 @@ func TestWriteVersionBatches_UsesParserSafeShapes(t *testing.T) {
 	if strings.Contains(content, "split(") {
 		t.Fatalf("unexpected split(...) expression in exporter output:\n%s", content)
 	}
-	if strings.Contains(content, "MERGE (:FactVersion {fact_key:") {
-		t.Fatalf("FactVersion MERGE should key on version_id only for parser compatibility:\n%s", content)
+	if strings.Contains(content, "MERGE (:CodeState {code_key:") {
+		t.Fatalf("CodeState MERGE should key on state_id only for parser compatibility:\n%s", content)
 	}
-	if !strings.Contains(content, "MERGE (:FactVersion:") || !strings.Contains(content, "{version_id: 'fv-") {
-		t.Fatalf("missing version_id-based MERGE:\n%s", content)
+	if !strings.Contains(content, "MERGE (:CodeState:") || !strings.Contains(content, "{state_id: 'cs-") {
+		t.Fatalf("missing state_id-based MERGE:\n%s", content)
 	}
-	if !strings.Contains(content, "MATCH (fk:FactKey") || !strings.Contains(content, "MATCH (fv:FactVersion {version_id:") {
+	if !strings.Contains(content, "MATCH (ck:CodeKey") || !strings.Contains(content, "MATCH (cs:CodeState {state_id:") {
 		t.Fatalf("expected both MATCH bindings before relationship MERGE:\n%s", content)
 	}
 }
 
-func TestFactVersionID_Deterministic(t *testing.T) {
+func TestCodeStateID_Deterministic(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 3, 20, 20, 22, 20, 0, time.UTC)
-	v := ledger.FactVersion{
-		FactKey:    "repo_fact|calls|x",
+	v := ledger.CodeState{
+		CodeKey:    "repo_fact|calls|x",
 		ValidFrom:  now,
 		TxID:       "tx-1",
 		CommitHash: "abc",
 	}
 
-	a := factVersionID(v)
-	b := factVersionID(v)
+	a := v.StateID()
+	b := v.StateID()
 	if a != b {
-		t.Fatalf("factVersionID is not deterministic: %q != %q", a, b)
+		t.Fatalf("codeStateID is not deterministic: %q != %q", a, b)
 	}
-	if !strings.HasPrefix(a, "fv-") {
-		t.Fatalf("expected fv- prefix, got %q", a)
+	if !strings.HasPrefix(a, "cs-") {
+		t.Fatalf("expected cs- prefix, got %q", a)
 	}
 }

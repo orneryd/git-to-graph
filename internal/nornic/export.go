@@ -2,8 +2,7 @@ package nornic
 
 import (
 	"bufio"
-	"crypto/sha1"
-	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,17 +16,17 @@ type Exporter struct {
 	BatchSize int
 }
 
-func (e *Exporter) Write(versions []ledger.FactVersion, events []ledger.MutationEvent) error {
+func (e *Exporter) Write(states []ledger.CodeState, changes []ledger.CodeChange) error {
 	if e.BatchSize <= 0 {
 		e.BatchSize = 500
 	}
 	if err := os.MkdirAll(e.OutDir, 0o755); err != nil {
 		return err
 	}
-	if err := writeVersionBatches(filepath.Join(e.OutDir, "nornic_versions.cypher"), versions, e.BatchSize); err != nil {
+	if err := writeVersionBatches(filepath.Join(e.OutDir, "nornic_versions.cypher"), states, e.BatchSize); err != nil {
 		return err
 	}
-	if err := writeEventBatches(filepath.Join(e.OutDir, "nornic_events.cypher"), events, e.BatchSize); err != nil {
+	if err := writeEventBatches(filepath.Join(e.OutDir, "nornic_events.cypher"), changes, e.BatchSize); err != nil {
 		return err
 	}
 	if err := writeBootstrapHint(filepath.Join(e.OutDir, "README.txt")); err != nil {
@@ -36,7 +35,7 @@ func (e *Exporter) Write(versions []ledger.FactVersion, events []ledger.Mutation
 	return nil
 }
 
-func writeVersionBatches(path string, versions []ledger.FactVersion, batch int) error {
+func writeVersionBatches(path string, versions []ledger.CodeState, batch int) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
@@ -45,42 +44,42 @@ func writeVersionBatches(path string, versions []ledger.FactVersion, batch int) 
 	w := bufio.NewWriter(f)
 	defer w.Flush()
 
-	fmt.Fprintln(w, "// Canonical fact-version upserts for NornicDB")
+	fmt.Fprintln(w, "// Canonical code-state upserts for NornicDB")
 	fmt.Fprintln(w, "// Run canonical-bootstrap.cypher first")
 	_ = batch
-	lastVersionByFactKey := map[string]string{}
+	lastStateByCodeKey := map[string]string{}
 	for _, v := range versions {
 		validFromISO := v.ValidFrom.UTC().Format("2006-01-02T15:04:05Z")
 		validToExpr := "null"
 		if v.ValidTo != nil {
 			validToExpr = fmt.Sprintf("datetime('%s')", v.ValidTo.UTC().Format("2006-01-02T15:04:05Z"))
 		}
-		versionID := factVersionID(v)
-		subjectID, predicate := factKeyParts(v.FactKey)
-		keyLabel, versionLabel := semanticLabels(predicate)
-		fmt.Fprintf(w, "MERGE (:FactKey:%s {subject_entity_id: '%s', predicate: '%s'});\n", keyLabel, esc(subjectID), esc(predicate))
+		stateID := v.StateID()
+		subjectID, predicate := factKeyParts(v.CodeKey)
+		keyLabel, versionLabel := semanticLabels(predicate, v.ValueJSON)
+		fmt.Fprintf(w, "MERGE (:CodeKey:%s {entity_id: '%s', relation_type: '%s'});\n", keyLabel, esc(subjectID), esc(predicate))
 		// Keep MERGE patterns as plain literal key/value lookups for parser compatibility.
-		fmt.Fprintf(w, "MERGE (:FactVersion:%s {version_id: '%s'}) SET fact_key = '%s', tx_id = '%s', commit_hash = '%s', valid_from_iso = '%s', valid_from = datetime('%s'), value_json = '%s', valid_to = %s, asserted_at = datetime('%s'), asserted_by = '%s', semantic_type = '%s';\n",
+		fmt.Fprintf(w, "MERGE (:CodeState:%s {state_id: '%s'}) SET code_key = '%s', tx_id = '%s', commit_hash = '%s', valid_from_iso = '%s', valid_from = datetime('%s'), value_json = '%s', valid_to = %s, asserted_at = datetime('%s'), asserted_by = '%s', semantic_type = '%s';\n",
 			esc(versionLabel),
-			esc(versionID), esc(v.FactKey), esc(v.TxID), esc(v.CommitHash), validFromISO, validFromISO, esc(v.ValueJSON), validToExpr, v.AssertedAt.UTC().Format("2006-01-02T15:04:05Z"), esc(v.AssertedBy), esc(versionLabel))
-		fmt.Fprintf(w, "MATCH (fk:FactKey {subject_entity_id: '%s', predicate: '%s'}) MATCH (fv:FactVersion {version_id: '%s'}) MERGE (fk)-[:HAS_VERSION]->(fv);\n",
-			esc(subjectID), esc(predicate), esc(versionID))
+			esc(stateID), esc(v.CodeKey), esc(v.TxID), esc(v.CommitHash), validFromISO, validFromISO, esc(v.ValueJSON), validToExpr, v.AssertedAt.UTC().Format("2006-01-02T15:04:05Z"), esc(v.AssertedBy), esc(versionLabel))
+		fmt.Fprintf(w, "MATCH (ck:CodeKey {entity_id: '%s', relation_type: '%s'}) MATCH (cs:CodeState {state_id: '%s'}) MERGE (ck)-[:HAS_STATE]->(cs);\n",
+			esc(subjectID), esc(predicate), esc(stateID))
 		fmt.Fprintf(w, "MERGE (:Commit {hash: '%s'}) SET timestamp = datetime('%s'), tx_id = '%s', actor = '%s';\n",
 			esc(v.CommitHash), v.AssertedAt.UTC().Format("2006-01-02T15:04:05Z"), esc(v.TxID), esc(v.AssertedBy))
-		fmt.Fprintf(w, "MATCH (c:Commit {hash: '%s'}) MATCH (fv:FactVersion {version_id: '%s'}) MERGE (c)-[:CHANGED]->(fv);\n",
-			esc(v.CommitHash), esc(versionID))
-		fmt.Fprintf(w, "MATCH (c:Commit {hash: '%s'}) MATCH (fk:FactKey {subject_entity_id: '%s', predicate: '%s'}) MERGE (c)-[:TOUCHED_KEY]->(fk);\n",
+		fmt.Fprintf(w, "MATCH (c:Commit {hash: '%s'}) MATCH (cs:CodeState {state_id: '%s'}) MERGE (c)-[:CHANGED]->(cs);\n",
+			esc(v.CommitHash), esc(stateID))
+		fmt.Fprintf(w, "MATCH (c:Commit {hash: '%s'}) MATCH (ck:CodeKey {entity_id: '%s', relation_type: '%s'}) MERGE (c)-[:TOUCHED]->(ck);\n",
 			esc(v.CommitHash), esc(subjectID), esc(predicate))
-		if prevVersionID, ok := lastVersionByFactKey[v.FactKey]; ok {
-			fmt.Fprintf(w, "MATCH (prev:FactVersion {version_id: '%s'}) MATCH (curr:FactVersion {version_id: '%s'}) MERGE (prev)-[:SUPERSEDED_BY]->(curr);\n",
-				esc(prevVersionID), esc(versionID))
+		if prevStateID, ok := lastStateByCodeKey[v.CodeKey]; ok {
+			fmt.Fprintf(w, "MATCH (prev:CodeState {state_id: '%s'}) MATCH (curr:CodeState {state_id: '%s'}) MERGE (prev)-[:SUPERSEDED_BY]->(curr);\n",
+				esc(prevStateID), esc(stateID))
 		}
-		lastVersionByFactKey[v.FactKey] = versionID
+		lastStateByCodeKey[v.CodeKey] = stateID
 	}
 	return nil
 }
 
-func writeEventBatches(path string, events []ledger.MutationEvent, batch int) error {
+func writeEventBatches(path string, events []ledger.CodeChange, batch int) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
@@ -89,17 +88,21 @@ func writeEventBatches(path string, events []ledger.MutationEvent, batch int) er
 	w := bufio.NewWriter(f)
 	defer w.Flush()
 
-	fmt.Fprintln(w, "// Mutation events aligned to ledger versions")
+	fmt.Fprintln(w, "// Code change events aligned to code states")
 	_ = batch
 	for _, ev := range events {
-		fmt.Fprintf(w, "MERGE (:MutationEvent {event_id: '%s'}) SET tx_id = '%s', actor = '%s', timestamp = datetime('%s'), op_type = '%s', commit_hash = '%s';\n",
-			esc(ev.EventID), esc(ev.TxID), esc(ev.Actor), ev.Timestamp.UTC().Format("2006-01-02T15:04:05Z"), esc(ev.OpType), esc(ev.CommitHash))
+		affectedStateID := ev.AffectedStateID
+		if strings.TrimSpace(affectedStateID) == "" {
+			affectedStateID = "missing"
+		}
+		fmt.Fprintf(w, "MERGE (:CodeChange {change_id: '%s'}) SET tx_id = '%s', actor = '%s', timestamp = datetime('%s'), op_type = '%s', commit_hash = '%s';\n",
+			esc(ev.ChangeID), esc(ev.TxID), esc(ev.Actor), ev.Timestamp.UTC().Format("2006-01-02T15:04:05Z"), esc(ev.OpType), esc(ev.CommitHash))
 		fmt.Fprintf(w, "MERGE (:Commit {hash: '%s'}) SET timestamp = datetime('%s'), tx_id = '%s', actor = '%s';\n",
 			esc(ev.CommitHash), ev.Timestamp.UTC().Format("2006-01-02T15:04:05Z"), esc(ev.TxID), esc(ev.Actor))
-		fmt.Fprintf(w, "MATCH (c:Commit {hash: '%s'}) MATCH (me:MutationEvent {event_id: '%s'}) MERGE (c)-[:EMITTED]->(me);\n",
-			esc(ev.CommitHash), esc(ev.EventID))
-		fmt.Fprintf(w, "MATCH (me:MutationEvent {event_id: '%s'}) MATCH (fv:FactVersion {fact_key: '%s', tx_id: '%s'}) MERGE (me)-[:AFFECTS]->(fv);\n",
-			esc(ev.EventID), esc(ev.AffectedFact), esc(ev.TxID))
+		fmt.Fprintf(w, "MATCH (c:Commit {hash: '%s'}) MATCH (cc:CodeChange {change_id: '%s'}) MERGE (c)-[:EMITTED]->(cc);\n",
+			esc(ev.CommitHash), esc(ev.ChangeID))
+		fmt.Fprintf(w, "MATCH (cc:CodeChange {change_id: '%s'}) MATCH (cs:CodeState {state_id: '%s'}) MERGE (cc)-[:IMPACTS]->(cs);\n",
+			esc(ev.ChangeID), esc(affectedStateID))
 	}
 	return nil
 }
@@ -134,26 +137,48 @@ func factKeyParts(factKey string) (subjectID, predicate string) {
 	return factKey, "unknown"
 }
 
-func factVersionID(v ledger.FactVersion) string {
-	validFromISO := v.ValidFrom.UTC().Format("2006-01-02T15:04:05Z")
-	payload := strings.Join([]string{v.FactKey, v.TxID, v.CommitHash, validFromISO}, "|")
-	sum := sha1.Sum([]byte(payload))
-	return "fv-" + hex.EncodeToString(sum[:])
-}
-
-func semanticLabels(predicate string) (keyLabel, versionLabel string) {
+func semanticLabels(predicate, valueJSON string) (keyLabel, versionLabel string) {
 	switch strings.ToLower(strings.TrimSpace(predicate)) {
 	case "file":
-		return "CodeFileKey", "CodeFileVersion"
+		return "CodeFileKey", "CodeFileState"
 	case "symbol":
-		return "CodeSymbolKey", "CodeSymbolVersion"
+		switch strings.ToLower(strings.TrimSpace(symbolKindFromValue(valueJSON))) {
+		case "function":
+			return "CodeSymbolKey", "FunctionSymbolState"
+		case "method":
+			return "CodeSymbolKey", "MethodSymbolState"
+		case "class":
+			return "CodeSymbolKey", "ClassSymbolState"
+		case "type":
+			return "CodeSymbolKey", "TypeSymbolState"
+		case "constant":
+			return "CodeSymbolKey", "ConstantSymbolState"
+		case "variable":
+			return "CodeSymbolKey", "VariableSymbolState"
+		default:
+			return "CodeSymbolKey", "CodeSymbolState"
+		}
 	case "calls":
-		return "CallEdgeKey", "CallEdgeVersion"
+		return "CallEdgeKey", "CallEdgeState"
 	case "contains":
-		return "ContainsEdgeKey", "ContainsEdgeVersion"
+		return "ContainsEdgeKey", "ContainsEdgeState"
 	case "import":
-		return "ImportEdgeKey", "ImportEdgeVersion"
+		return "ImportEdgeKey", "ImportEdgeState"
+	case "inherits":
+		return "InheritsEdgeKey", "InheritsEdgeState"
 	default:
-		return "CodeFactKey", "CodeFactVersion"
+		return "CodeEntityKey", "CodeEntityState"
 	}
+}
+
+func symbolKindFromValue(valueJSON string) string {
+	if strings.TrimSpace(valueJSON) == "" {
+		return ""
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(valueJSON), &payload); err != nil {
+		return ""
+	}
+	v, _ := payload["kind"].(string)
+	return v
 }

@@ -40,6 +40,30 @@ func SetBackendMode(mode string) {
 	default:
 		forcedBackend = BackendAuto
 	}
+
+}
+
+func identifierChildren(n *sitter.Node, src []byte) []string {
+	count := int(n.ChildCount())
+	out := make([]string, 0, count)
+	seen := map[string]struct{}{}
+	for i := 0; i < count; i++ {
+		c := n.Child(i)
+		t := c.Type()
+		if t != "identifier" && t != "type_identifier" && t != "property_identifier" {
+			continue
+		}
+		name := strings.TrimSpace(nodeText(c, src))
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	return out
 }
 
 var (
@@ -158,6 +182,14 @@ func parseTreeSitter(path, content, lang string) (fg model.FileGraph, ok bool) {
 			name := firstIdentifierChild(n, []byte(content))
 			if name != "" {
 				fg.Symbols = append(fg.Symbols, model.Symbol{ID: symbolID(path, name, "type"), Name: name, Kind: "type", FilePath: path, Language: lang})
+			}
+		case "const_declaration", "const_spec", "constant_declaration":
+			for _, name := range identifierChildren(n, []byte(content)) {
+				fg.Symbols = append(fg.Symbols, model.Symbol{ID: symbolID(path, name, "constant"), Name: name, Kind: "constant", FilePath: path, Language: lang})
+			}
+		case "var_declaration", "var_spec", "variable_declaration", "lexical_declaration":
+			for _, name := range identifierChildren(n, []byte(content)) {
+				fg.Symbols = append(fg.Symbols, model.Symbol{ID: symbolID(path, name, "variable"), Name: name, Kind: "variable", FilePath: path, Language: lang})
 			}
 		case "import_declaration", "import_statement":
 			v := strings.TrimSpace(nodeText(n, []byte(content)))

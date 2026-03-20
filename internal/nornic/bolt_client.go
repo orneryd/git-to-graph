@@ -22,7 +22,7 @@ type BoltConfig struct {
 	ContinueOnError bool
 }
 
-func ApplyLedgerBolt(ctx context.Context, cfg BoltConfig, versions []ledger.FactVersion, events []ledger.MutationEvent, progress ApplyProgressFunc) (int, error) {
+func ApplyLedgerBolt(ctx context.Context, cfg BoltConfig, versions []ledger.CodeState, events []ledger.CodeChange, progress ApplyProgressFunc) (int, error) {
 	if cfg.URI == "" {
 		cfg.URI = "bolt://localhost:7687"
 	}
@@ -53,40 +53,40 @@ func ApplyLedgerBolt(ctx context.Context, cfg BoltConfig, versions []ledger.Fact
 	done := 0
 
 	const qVersions = `UNWIND $rows AS row
-MERGE (fk:FactKey {subject_entity_id: row.subject_entity_id, predicate: row.predicate})
-MERGE (fv:FactVersion {version_id: row.version_id})
-SET fv.fact_key = row.fact_key,
-    fv.tx_id = row.tx_id,
-    fv.commit_hash = row.commit_hash,
-    fv.valid_from_iso = row.valid_from_iso,
-    fv.valid_from = datetime(row.valid_from_iso),
-    fv.value_json = row.value_json,
-    fv.valid_to = CASE WHEN row.valid_to_iso IS NULL THEN null ELSE datetime(row.valid_to_iso) END,
-    fv.asserted_at = datetime(row.asserted_at_iso),
-    fv.asserted_by = row.asserted_by,
-    fv.semantic_type = row.semantic_type
-MERGE (fk)-[:HAS_VERSION]->(fv)
+MERGE (ck:CodeKey {entity_id: row.entity_id, relation_type: row.relation_type})
+MERGE (cs:CodeState {state_id: row.state_id})
+SET cs.code_key = row.code_key,
+    cs.tx_id = row.tx_id,
+    cs.commit_hash = row.commit_hash,
+    cs.valid_from_iso = row.valid_from_iso,
+    cs.valid_from = datetime(row.valid_from_iso),
+    cs.value_json = row.value_json,
+    cs.valid_to = CASE WHEN row.valid_to_iso IS NULL THEN null ELSE datetime(row.valid_to_iso) END,
+    cs.asserted_at = datetime(row.asserted_at_iso),
+    cs.asserted_by = row.asserted_by,
+    cs.semantic_type = row.semantic_type
+MERGE (ck)-[:HAS_STATE]->(cs)
 MERGE (c:Commit {hash: row.commit_hash})
-SET c.timestamp = datetime(row.asserted_at_iso), c.tx_id = row.tx_id, c.actor = row.asserted_by
-MERGE (c)-[:CHANGED]->(fv)
-MERGE (c)-[:TOUCHED_KEY]->(fk)`
-	const qVersionRow = `MERGE (fk:FactKey {subject_entity_id: $subject_entity_id, predicate: $predicate})
-MERGE (fv:FactVersion {version_id: $version_id})
-SET fv.fact_key = $fact_key,
-    fv.tx_id = $tx_id,
-    fv.commit_hash = $commit_hash,
-    fv.valid_from_iso = $valid_from_iso,
-    fv.valid_from = datetime($valid_from_iso),
-    fv.value_json = $value_json,
-    fv.valid_to = CASE WHEN $valid_to_iso IS NULL THEN null ELSE datetime($valid_to_iso) END,
-    fv.asserted_at = datetime($asserted_at_iso),
-    fv.asserted_by = $asserted_by,
-    fv.semantic_type = $semantic_type
-MERGE (fk)-[:HAS_VERSION]->(fv)
+ON CREATE SET c.timestamp = datetime(row.asserted_at_iso), c.tx_id = row.tx_id, c.actor = row.asserted_by
+MERGE (c)-[:CHANGED]->(cs)
+MERGE (c)-[:TOUCHED]->(ck)`
+	const qVersionRow = `MERGE (ck:CodeKey {entity_id: $entity_id, relation_type: $relation_type})
+MERGE (cs:CodeState {state_id: $state_id})
+SET cs.code_key = $code_key,
+    cs.tx_id = $tx_id,
+    cs.commit_hash = $commit_hash,
+    cs.valid_from_iso = $valid_from_iso,
+    cs.valid_from = datetime($valid_from_iso),
+    cs.value_json = $value_json,
+    cs.valid_to = CASE WHEN $valid_to_iso IS NULL THEN null ELSE datetime($valid_to_iso) END,
+    cs.asserted_at = datetime($asserted_at_iso),
+    cs.asserted_by = $asserted_by,
+    cs.semantic_type = $semantic_type
+MERGE (ck)-[:HAS_STATE]->(cs)
 MERGE (c:Commit {hash: $commit_hash})
-SET c.timestamp = datetime($asserted_at_iso), c.tx_id = $tx_id, c.actor = $asserted_by
-MERGE (c)-[:CHANGED]->(fv)
-MERGE (c)-[:TOUCHED_KEY]->(fk)`
+ON CREATE SET c.timestamp = datetime($asserted_at_iso), c.tx_id = $tx_id, c.actor = $asserted_by
+MERGE (c)-[:CHANGED]->(cs)
+MERGE (c)-[:TOUCHED]->(ck)`
 
 	for i := 0; i < len(versions); i += batch {
 		end := i + batch
@@ -95,21 +95,20 @@ MERGE (c)-[:TOUCHED_KEY]->(fk)`
 		}
 		rows := make([]map[string]any, 0, end-i)
 		for _, v := range versions[i:end] {
-			subjectID, predicate := factKeyParts(v.FactKey)
-			_, versionLabel := semanticLabels(predicate)
+			subjectID, predicate := factKeyParts(v.CodeKey)
 			row := map[string]any{
-				"subject_entity_id": subjectID,
-				"predicate":         predicate,
-				"version_id":        factVersionID(v),
-				"fact_key":          v.FactKey,
-				"tx_id":             v.TxID,
-				"commit_hash":       v.CommitHash,
-				"valid_from_iso":    v.ValidFrom.UTC().Format("2006-01-02T15:04:05Z"),
-				"asserted_at_iso":   v.AssertedAt.UTC().Format("2006-01-02T15:04:05Z"),
-				"asserted_by":       v.AssertedBy,
-				"value_json":        v.ValueJSON,
-				"semantic_type":     versionLabel,
-				"valid_to_iso":      nil,
+				"entity_id":       subjectID,
+				"relation_type":   predicate,
+				"state_id":        v.StateID(),
+				"code_key":        v.CodeKey,
+				"tx_id":           v.TxID,
+				"commit_hash":     v.CommitHash,
+				"valid_from_iso":  v.ValidFrom.UTC().Format("2006-01-02T15:04:05Z"),
+				"asserted_at_iso": v.AssertedAt.UTC().Format("2006-01-02T15:04:05Z"),
+				"asserted_by":     v.AssertedBy,
+				"value_json":      v.ValueJSON,
+				"semantic_type":   predicate,
+				"valid_to_iso":    nil,
 			}
 			if v.ValidTo != nil {
 				row["valid_to_iso"] = v.ValidTo.UTC().Format("2006-01-02T15:04:05Z")
@@ -156,29 +155,29 @@ MERGE (c)-[:TOUCHED_KEY]->(fk)`
 	}
 
 	const qEvents = `UNWIND $rows AS row
-MERGE (me:MutationEvent {event_id: row.event_id})
-SET me.tx_id = row.tx_id,
-    me.actor = row.actor,
-    me.timestamp = datetime(row.timestamp_iso),
-    me.op_type = row.op_type,
-    me.commit_hash = row.commit_hash
+MERGE (cc:CodeChange {change_id: row.change_id})
+SET cc.tx_id = row.tx_id,
+    cc.actor = row.actor,
+    cc.timestamp = datetime(row.timestamp_iso),
+    cc.op_type = row.op_type,
+    cc.commit_hash = row.commit_hash
 MERGE (c:Commit {hash: row.commit_hash})
-SET c.timestamp = datetime(row.timestamp_iso), c.tx_id = row.tx_id, c.actor = row.actor
-MERGE (c)-[:EMITTED]->(me)
-WITH me, row
-MATCH (fv:FactVersion {fact_key: row.affected_fact, tx_id: row.tx_id})
-MERGE (me)-[:AFFECTS]->(fv)`
-	const qEventRow = `MERGE (me:MutationEvent {event_id: $event_id})
-SET me.tx_id = $tx_id,
-    me.actor = $actor,
-    me.timestamp = datetime($timestamp_iso),
-    me.op_type = $op_type,
-    me.commit_hash = $commit_hash
+ON CREATE SET c.timestamp = datetime(row.timestamp_iso), c.tx_id = row.tx_id, c.actor = row.actor
+MERGE (c)-[:EMITTED]->(cc)
+WITH cc, row
+MATCH (cs:CodeState {state_id: row.affected_state_id})
+MERGE (cc)-[:IMPACTS]->(cs)`
+	const qEventRow = `MERGE (cc:CodeChange {change_id: $change_id})
+SET cc.tx_id = $tx_id,
+    cc.actor = $actor,
+    cc.timestamp = datetime($timestamp_iso),
+    cc.op_type = $op_type,
+    cc.commit_hash = $commit_hash
 MERGE (c:Commit {hash: $commit_hash})
-SET c.timestamp = datetime($timestamp_iso), c.tx_id = $tx_id, c.actor = $actor
-MERGE (c)-[:EMITTED]->(me)
-MATCH (fv:FactVersion {fact_key: $affected_fact, tx_id: $tx_id})
-MERGE (me)-[:AFFECTS]->(fv)`
+ON CREATE SET c.timestamp = datetime($timestamp_iso), c.tx_id = $tx_id, c.actor = $actor
+MERGE (c)-[:EMITTED]->(cc)
+MATCH (cs:CodeState {state_id: $affected_state_id})
+MERGE (cc)-[:IMPACTS]->(cs)`
 
 	for i := 0; i < len(events); i += batch {
 		end := i + batch
@@ -187,14 +186,18 @@ MERGE (me)-[:AFFECTS]->(fv)`
 		}
 		rows := make([]map[string]any, 0, end-i)
 		for _, ev := range events[i:end] {
+			affectedStateID := ev.AffectedStateID
+			if strings.TrimSpace(affectedStateID) == "" {
+				affectedStateID = "missing"
+			}
 			rows = append(rows, map[string]any{
-				"event_id":      ev.EventID,
-				"tx_id":         ev.TxID,
-				"actor":         ev.Actor,
-				"timestamp_iso": ev.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
-				"op_type":       ev.OpType,
-				"commit_hash":   ev.CommitHash,
-				"affected_fact": ev.AffectedFact,
+				"change_id":         ev.ChangeID,
+				"tx_id":             ev.TxID,
+				"actor":             ev.Actor,
+				"timestamp_iso":     ev.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
+				"op_type":           ev.OpType,
+				"commit_hash":       ev.CommitHash,
+				"affected_state_id": affectedStateID,
 			})
 		}
 		stmtCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -357,11 +360,11 @@ func statementTimeout() time.Duration {
 func dbBatchSize() int {
 	v := strings.TrimSpace(os.Getenv("G2G_DB_BATCH_SIZE"))
 	if v == "" {
-		return 25
+		return 100
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil || n <= 0 {
-		return 25
+		return 100
 	}
 	if n > 1000 {
 		return 1000

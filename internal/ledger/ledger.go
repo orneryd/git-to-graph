@@ -2,6 +2,8 @@ package ledger
 
 import (
 	"bufio"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,8 +14,8 @@ import (
 	"github.com/c815719/git-to-graph/internal/model"
 )
 
-type FactVersion struct {
-	FactKey    string     `json:"fact_key"`
+type CodeState struct {
+	CodeKey    string     `json:"code_key"`
 	ValueJSON  string     `json:"value_json"`
 	ValidFrom  time.Time  `json:"valid_from"`
 	ValidTo    *time.Time `json:"valid_to,omitempty"`
@@ -23,15 +25,19 @@ type FactVersion struct {
 	TxID       string     `json:"tx_id"`
 }
 
-type MutationEvent struct {
-	EventID      string    `json:"event_id"`
-	TxID         string    `json:"tx_id"`
-	Actor        string    `json:"actor"`
-	Timestamp    time.Time `json:"timestamp"`
-	OpType       string    `json:"op_type"`
-	CommitHash   string    `json:"commit_hash"`
-	AffectedFact string    `json:"affected_fact"`
+type CodeChange struct {
+	ChangeID        string    `json:"change_id"`
+	TxID            string    `json:"tx_id"`
+	Actor           string    `json:"actor"`
+	Timestamp       time.Time `json:"timestamp"`
+	OpType          string    `json:"op_type"`
+	CommitHash      string    `json:"commit_hash"`
+	AffectedCode    string    `json:"affected_code"`
+	AffectedStateID string    `json:"affected_state_id,omitempty"`
 }
+
+type FactVersion = CodeState
+type MutationEvent = CodeChange
 
 type ApplyStats struct {
 	Created int
@@ -40,14 +46,14 @@ type ApplyStats struct {
 }
 
 type Ledger struct {
-	versions []FactVersion
-	events   []MutationEvent
-	current  map[string]*FactVersion
-	txSeq    int
+	states  []CodeState
+	changes []CodeChange
+	current map[string]*CodeState
+	txSeq   int
 }
 
 func New() *Ledger {
-	return &Ledger{current: map[string]*FactVersion{}}
+	return &Ledger{current: map[string]*CodeState{}}
 }
 
 func (l *Ledger) ApplySnapshot(facts map[string]string, commit model.Commit) ApplyStats {
@@ -63,14 +69,15 @@ func (l *Ledger) ApplySnapshot(facts map[string]string, commit model.Commit) App
 		ts := commit.Timestamp
 		prev.ValidTo = &ts
 		stats.Closed++
-		l.events = append(l.events, MutationEvent{
-			EventID:      fmt.Sprintf("event-%s-close-%s", shortHash(commit.Hash), sanitizeKey(key)),
-			TxID:         txID,
-			Actor:        commit.Author,
-			Timestamp:    commit.Timestamp,
-			OpType:       "CLOSE_FACT_VERSION",
-			CommitHash:   commit.Hash,
-			AffectedFact: key,
+		l.changes = append(l.changes, CodeChange{
+			ChangeID:        fmt.Sprintf("change-%s-close-%s", shortHash(commit.Hash), sanitizeKey(key)),
+			TxID:            txID,
+			Actor:           commit.Author,
+			Timestamp:       commit.Timestamp,
+			OpType:          "CLOSE_CODE_STATE",
+			CommitHash:      commit.Hash,
+			AffectedCode:    key,
+			AffectedStateID: prev.StateID(),
 		})
 		delete(l.current, key)
 	}
@@ -86,8 +93,8 @@ func (l *Ledger) ApplySnapshot(facts map[string]string, commit model.Commit) App
 			stats.Closed++
 		}
 
-		fv := FactVersion{
-			FactKey:    key,
+		cs := CodeState{
+			CodeKey:    key,
 			ValueJSON:  value,
 			ValidFrom:  commit.Timestamp,
 			AssertedAt: commit.Timestamp,
@@ -95,29 +102,38 @@ func (l *Ledger) ApplySnapshot(facts map[string]string, commit model.Commit) App
 			CommitHash: commit.Hash,
 			TxID:       txID,
 		}
-		l.versions = append(l.versions, fv)
-		l.current[key] = &l.versions[len(l.versions)-1]
+		l.states = append(l.states, cs)
+		l.current[key] = &l.states[len(l.states)-1]
 		stats.Created++
-		l.events = append(l.events, MutationEvent{
-			EventID:      fmt.Sprintf("event-%s-upsert-%s", shortHash(commit.Hash), sanitizeKey(key)),
-			TxID:         txID,
-			Actor:        commit.Author,
-			Timestamp:    commit.Timestamp,
-			OpType:       "UPSERT_FACT_VERSION",
-			CommitHash:   commit.Hash,
-			AffectedFact: key,
+		l.changes = append(l.changes, CodeChange{
+			ChangeID:        fmt.Sprintf("change-%s-upsert-%s", shortHash(commit.Hash), sanitizeKey(key)),
+			TxID:            txID,
+			Actor:           commit.Author,
+			Timestamp:       commit.Timestamp,
+			OpType:          "UPSERT_CODE_STATE",
+			CommitHash:      commit.Hash,
+			AffectedCode:    key,
+			AffectedStateID: cs.StateID(),
 		})
 	}
 
 	return stats
 }
 
-func (l *Ledger) Versions() []FactVersion {
-	return l.versions
+func (l *Ledger) CodeStates() []CodeState {
+	return l.states
 }
 
-func (l *Ledger) Events() []MutationEvent {
-	return l.events
+func (l *Ledger) CodeChanges() []CodeChange {
+	return l.changes
+}
+
+func (l *Ledger) Versions() []CodeState {
+	return l.states
+}
+
+func (l *Ledger) Events() []CodeChange {
+	return l.changes
 }
 
 func WriteJSONL[T any](path string, rows []T) error {
@@ -135,26 +151,26 @@ func WriteJSONL[T any](path string, rows []T) error {
 	return nil
 }
 
-func LoadSnapshotAt(ledgerPath string, at time.Time) (map[string]FactVersion, error) {
+func LoadSnapshotAt(ledgerPath string, at time.Time) (map[string]CodeState, error) {
 	f, err := os.Open(ledgerPath)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
 
-	snap := map[string]FactVersion{}
+	snap := map[string]CodeState{}
 	s := bufio.NewScanner(f)
 	for s.Scan() {
 		line := s.Bytes()
 		if len(line) == 0 {
 			continue
 		}
-		var fv FactVersion
-		if err := json.Unmarshal(line, &fv); err != nil {
+		var cs CodeState
+		if err := json.Unmarshal(line, &cs); err != nil {
 			return nil, err
 		}
-		if !fv.ValidFrom.After(at) && (fv.ValidTo == nil || fv.ValidTo.After(at)) {
-			snap[fv.FactKey] = fv
+		if !cs.ValidFrom.After(at) && (cs.ValidTo == nil || cs.ValidTo.After(at)) {
+			snap[cs.CodeKey] = cs
 		}
 	}
 	if err := s.Err(); err != nil {
@@ -163,7 +179,7 @@ func LoadSnapshotAt(ledgerPath string, at time.Time) (map[string]FactVersion, er
 	return snap, nil
 }
 
-func WriteSnapshot(w io.Writer, snapshot map[string]FactVersion) error {
+func WriteSnapshot(w io.Writer, snapshot map[string]CodeState) error {
 	keys := make([]string, 0, len(snapshot))
 	for k := range snapshot {
 		keys = append(keys, k)
@@ -199,4 +215,15 @@ func sanitizeKey(v string) string {
 		return string(out[:24])
 	}
 	return string(out)
+}
+
+func (s CodeState) StateID() string {
+	return codeStateID(s.CodeKey, s.TxID, s.CommitHash, s.ValidFrom)
+}
+
+func codeStateID(codeKey, txID, commitHash string, validFrom time.Time) string {
+	validFromISO := validFrom.UTC().Format("2006-01-02T15:04:05Z")
+	payload := fmt.Sprintf("%s|%s|%s|%s", codeKey, txID, commitHash, validFromISO)
+	sum := sha1.Sum([]byte(payload))
+	return "cs-" + hex.EncodeToString(sum[:])
 }

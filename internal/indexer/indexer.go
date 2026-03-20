@@ -145,11 +145,11 @@ func (i *Indexer) Run() error {
 	ledgerEventsPath := filepath.Join(artifactDir, "mutation_events.jsonl")
 
 	reporter.StartPhase("write_ledger", 2)
-	if err := ledger.WriteJSONL(ledgerVersionsPath, led.Versions()); err != nil {
+	if err := ledger.WriteJSONL(ledgerVersionsPath, led.CodeStates()); err != nil {
 		return err
 	}
 	reporter.Tick(filepath.Base(ledgerVersionsPath))
-	if err := ledger.WriteJSONL(ledgerEventsPath, led.Events()); err != nil {
+	if err := ledger.WriteJSONL(ledgerEventsPath, led.CodeChanges()); err != nil {
 		return err
 	}
 	reporter.Tick(filepath.Base(ledgerEventsPath))
@@ -157,22 +157,24 @@ func (i *Indexer) Run() error {
 
 	reporter.StartPhase("export_nornic", 1)
 	ex := nornic.Exporter{OutDir: artifactDir, BatchSize: i.cfg.BatchSize}
-	if err := ex.Write(led.Versions(), led.Events()); err != nil {
+	if err := ex.Write(led.CodeStates(), led.CodeChanges()); err != nil {
 		return err
 	}
 	reporter.Tick("nornic cypher")
 	reporter.Complete("nornic export complete")
 
 	if i.cfg.ApplyToDB {
-		cypherFiles := make([]string, 0, 3)
+		bootstrapFiles := make([]string, 0, 2)
 		autoBootstrapPath := filepath.Join(artifactDir, "g2g-bootstrap.cypher")
 		if err := nornic.WriteDefaultBootstrap(autoBootstrapPath); err != nil {
 			return err
 		}
-		cypherFiles = append(cypherFiles, autoBootstrapPath)
+		bootstrapFiles = append(bootstrapFiles, autoBootstrapPath)
 		if strings.TrimSpace(i.cfg.BootstrapCypher) != "" {
-			cypherFiles = append(cypherFiles, i.cfg.BootstrapCypher)
+			bootstrapFiles = append(bootstrapFiles, i.cfg.BootstrapCypher)
 		}
+		cypherFiles := make([]string, 0, 4)
+		cypherFiles = append(cypherFiles, bootstrapFiles...)
 		cypherFiles = append(cypherFiles,
 			filepath.Join(artifactDir, "nornic_versions.cypher"),
 			filepath.Join(artifactDir, "nornic_events.cypher"),
@@ -202,7 +204,30 @@ func (i *Indexer) Run() error {
 				}
 			})
 		} else {
-			boltTotal := len(led.Versions()) + len(led.Events())
+			bootstrapStmtCount, berr := nornic.CountStatements(bootstrapFiles)
+			if berr != nil || bootstrapStmtCount <= 0 {
+				bootstrapStmtCount = 1
+			}
+			reporter.StartPhase("bootstrap_nornic", bootstrapStmtCount)
+			bootstrapCount, berr := nornic.ApplyCypherFilesBolt(context.Background(), nornic.BoltConfig{
+				URI:             i.cfg.BoltURI,
+				User:            i.cfg.DBUser,
+				Password:        i.cfg.DBPassword,
+				Token:           i.cfg.DBToken,
+				Database:        i.cfg.DBDatabase,
+				ContinueOnError: i.cfg.ContinueOnDBError,
+			}, bootstrapFiles, func(done, total int, _ string) {
+				if total > 0 {
+					reporter.Tick(fmt.Sprintf("%d/%d", done, total))
+				}
+			})
+			if berr != nil {
+				return berr
+			}
+			reporter.Tick(fmt.Sprintf("statements=%d", bootstrapCount))
+			reporter.Complete("nornic bootstrap complete")
+
+			boltTotal := len(led.CodeStates()) + len(led.CodeChanges())
 			if boltTotal <= 0 {
 				boltTotal = 1
 			}
@@ -214,7 +239,7 @@ func (i *Indexer) Run() error {
 				Token:           i.cfg.DBToken,
 				Database:        i.cfg.DBDatabase,
 				ContinueOnError: i.cfg.ContinueOnDBError,
-			}, led.Versions(), led.Events(), func(done, total int, _ string) {
+			}, led.CodeStates(), led.CodeChanges(), func(done, total int, _ string) {
 				if total > 0 {
 					reporter.Tick(fmt.Sprintf("%d/%d", done, total))
 				}
@@ -230,8 +255,8 @@ func (i *Indexer) Run() error {
 	reporter.Info("Summary:")
 	reporter.Info(fmt.Sprintf("  commits: %d", len(commits)))
 	reporter.Info(fmt.Sprintf("  active files: %d", len(state)))
-	reporter.Info(fmt.Sprintf("  fact versions: %d", len(led.Versions())))
-	reporter.Info(fmt.Sprintf("  mutation events: %d", len(led.Events())))
+	reporter.Info(fmt.Sprintf("  code states: %d", len(led.CodeStates())))
+	reporter.Info(fmt.Sprintf("  code changes: %d", len(led.CodeChanges())))
 	reporter.Info(fmt.Sprintf("  unresolved calls: %d", unresolvedCalls))
 	if !i.cfg.ApplyToDB {
 		reporter.Info(fmt.Sprintf("  output: %s", i.cfg.OutDir))
