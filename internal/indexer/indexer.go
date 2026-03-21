@@ -60,6 +60,9 @@ func (i *Indexer) Run() error {
 	if err := gr.ValidateRepo(); err != nil {
 		return err
 	}
+	if dirty, err := gr.IsDirty(); err == nil && dirty {
+		reporter.Info("Warning: repository has uncommitted changes; index includes committed history only")
+	}
 
 	commits, err := gr.CommitList(i.cfg.From, i.cfg.To)
 	if err != nil {

@@ -150,6 +150,14 @@ func (r *Reader) IsIgnored(path string) (bool, error) {
 	return false, err
 }
 
+func (r *Reader) IsDirty() (bool, error) {
+	out, err := r.run("status", "--porcelain")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
 func (r *Reader) run(args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = r.repoPath

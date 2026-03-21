@@ -196,19 +196,9 @@ func parseTreeSitter(path, content, lang string) (fg model.FileGraph, ok bool) {
 			if v != "" {
 				fg.Imports = append(fg.Imports, v)
 			}
-		case "call_expression", "invocation_expression":
-			callee := nodeFieldText(n, "function", []byte(content))
-			if callee == "" {
-				callee = firstIdentifierChild(n, []byte(content))
-			}
-			callee = normalizeCall(callee)
-			if callee != "" {
-				if _, skip := keywordCalls[callee]; !skip {
-					fg.Calls = append(fg.Calls, model.CallEdge{Caller: "file::" + path, Callee: callee})
-				}
-			}
 		}
 	})
+	collectCallsWithScope(root, []byte(content), path, "file::"+path, &fg.Calls)
 
 	if len(fg.Imports) == 0 {
 		for _, m := range importRe.FindAllStringSubmatch(content, -1) {
@@ -295,6 +285,43 @@ func firstIdentifierChild(n *sitter.Node, src []byte) string {
 		}
 	}
 	return ""
+}
+
+func collectCallsWithScope(n *sitter.Node, src []byte, path, caller string, out *[]model.CallEdge) {
+	if n == nil {
+		return
+	}
+	nextCaller := caller
+	t := n.Type()
+	switch t {
+	case "function_declaration", "function_definition", "method_definition", "method_declaration":
+		name := nodeFieldText(n, "name", src)
+		if name == "" {
+			name = firstIdentifierChild(n, src)
+		}
+		if name != "" {
+			kind := "function"
+			if strings.Contains(t, "method") {
+				kind = "method"
+			}
+			nextCaller = symbolID(path, name, kind)
+		}
+	case "call_expression", "invocation_expression":
+		callee := nodeFieldText(n, "function", src)
+		if callee == "" {
+			callee = firstIdentifierChild(n, src)
+		}
+		callee = normalizeCall(callee)
+		if callee != "" {
+			if _, skip := keywordCalls[callee]; !skip {
+				*out = append(*out, model.CallEdge{Caller: nextCaller, Callee: callee})
+			}
+		}
+	}
+	count := int(n.ChildCount())
+	for i := 0; i < count; i++ {
+		collectCallsWithScope(n.Child(i), src, path, nextCaller, out)
+	}
 }
 
 func normalizeCall(v string) string {

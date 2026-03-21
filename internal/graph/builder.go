@@ -10,6 +10,21 @@ import (
 
 func BuildFacts(repoID string, files map[string]model.FileGraph, callTargets map[string]string) map[string]string {
 	facts := map[string]string{}
+	localCallable := map[string]map[string]string{}
+	for path, fg := range files {
+		byName := map[string]string{}
+		for _, sym := range fg.Symbols {
+			if !isCallableKind(sym.Kind) {
+				continue
+			}
+			if existing, ok := byName[sym.Name]; ok && existing != sym.ID {
+				delete(byName, sym.Name)
+				continue
+			}
+			byName[sym.Name] = sym.ID
+		}
+		localCallable[path] = byName
+	}
 
 	for path, fg := range files {
 		facts[factKey("file", path)] = mustJSON(map[string]any{
@@ -20,8 +35,8 @@ func BuildFacts(repoID string, files map[string]model.FileGraph, callTargets map
 
 		for _, imp := range dedupeStrings(fg.Imports) {
 			facts[factKey("import", path+"->"+imp)] = mustJSON(map[string]any{
-				"repo":  repoID,
-				"from":  path,
+				"repo":   repoID,
+				"from":   path,
 				"import": imp,
 			})
 		}
@@ -45,7 +60,11 @@ func BuildFacts(repoID string, files map[string]model.FileGraph, callTargets map
 		for _, call := range fg.Calls {
 			calleeID, ok := callTargets[call.Callee]
 			if !ok {
-				continue
+				if localID, localOK := localCallable[path][call.Callee]; localOK {
+					calleeID = localID
+				} else {
+					continue
+				}
 			}
 			facts[factKey("calls", call.Caller+"->"+calleeID)] = mustJSON(map[string]any{
 				"repo":   repoID,
@@ -62,6 +81,9 @@ func BuildNameIndex(files map[string]model.FileGraph) map[string]string {
 	byName := map[string][]string{}
 	for _, fg := range files {
 		for _, sym := range fg.Symbols {
+			if !isCallableKind(sym.Kind) {
+				continue
+			}
 			byName[sym.Name] = append(byName[sym.Name], sym.ID)
 		}
 	}
@@ -73,6 +95,15 @@ func BuildNameIndex(files map[string]model.FileGraph) map[string]string {
 		}
 	}
 	return resolved
+}
+
+func isCallableKind(kind string) bool {
+	switch kind {
+	case "function", "method", "class", "type":
+		return true
+	default:
+		return false
+	}
 }
 
 func factKey(kind, id string) string {
