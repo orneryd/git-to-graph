@@ -133,32 +133,37 @@ MERGE (c)-[:TOUCHED]->(ck)`
 		cancel()
 		if err != nil {
 			// Fallback: some Nornic builds reject this UNWIND mutation shape.
-			for j, row := range rows {
-				rowCtx, rowCancel := context.WithTimeout(ctx, timeout)
-				rowResAny, rowErr := session.ExecuteWrite(rowCtx, func(tx neo4j.ManagedTransaction) (any, error) {
-					res, runErr := tx.Run(rowCtx, qVersionRow, row)
+			logFallbackQueryError("versions", err, qVersions, qVersionRow)
+			chunkCtx, chunkCancel := context.WithTimeout(ctx, timeout)
+			chunkResAny, chunkErr := session.ExecuteWrite(chunkCtx, func(tx neo4j.ManagedTransaction) (any, error) {
+				localNodes := 0
+				localEdges := 0
+				for j, row := range rows {
+					res, runErr := tx.Run(chunkCtx, qVersionRow, row)
 					if runErr != nil {
-						return nil, runErr
+						return nil, fmt.Errorf("row %d run: %w", i+j, runErr)
 					}
-					summary, consumeErr := res.Consume(rowCtx)
+					summary, consumeErr := res.Consume(chunkCtx)
 					if consumeErr != nil {
-						return nil, consumeErr
+						return nil, fmt.Errorf("row %d consume: %w", i+j, consumeErr)
 					}
 					n, r := summaryCreatedCounts(summary)
-					return [2]int{n, r}, nil
-				})
-				rowCancel()
-				if rowErr != nil {
-					return done, fmt.Errorf("apply version batch [%d:%d] (row fallback failed at %d): %w", i, end, i+j, rowErr)
+					localNodes += n
+					localEdges += r
 				}
-				if counts, ok := rowResAny.([2]int); ok {
-					nodesCreated += counts[0]
-					relationshipsCreated += counts[1]
-				}
-				done++
-				if progress != nil {
-					progress(done, total, fmt.Sprintf("nodes=%d edges=%d", nodesCreated, relationshipsCreated))
-				}
+				return [2]int{localNodes, localEdges}, nil
+			})
+			chunkCancel()
+			if chunkErr != nil {
+				return done, fmt.Errorf("apply version batch [%d:%d] (row fallback txn failed): %w", i, end, chunkErr)
+			}
+			if counts, ok := chunkResAny.([2]int); ok {
+				nodesCreated += counts[0]
+				relationshipsCreated += counts[1]
+			}
+			done += len(rows)
+			if progress != nil {
+				progress(done, total, fmt.Sprintf("nodes=%d edges=%d", nodesCreated, relationshipsCreated))
 			}
 			continue
 		}
@@ -241,32 +246,37 @@ MERGE (cc)-[:IMPACTS]->(cs)`
 		cancel()
 		if err != nil {
 			// Fallback: execute event upserts row-by-row when UNWIND mutation is rejected.
-			for j, row := range rows {
-				rowCtx, rowCancel := context.WithTimeout(ctx, timeout)
-				rowResAny, rowErr := session.ExecuteWrite(rowCtx, func(tx neo4j.ManagedTransaction) (any, error) {
-					res, runErr := tx.Run(rowCtx, qEventRow, row)
+			logFallbackQueryError("events", err, qEvents, qEventRow)
+			chunkCtx, chunkCancel := context.WithTimeout(ctx, timeout)
+			chunkResAny, chunkErr := session.ExecuteWrite(chunkCtx, func(tx neo4j.ManagedTransaction) (any, error) {
+				localNodes := 0
+				localEdges := 0
+				for j, row := range rows {
+					res, runErr := tx.Run(chunkCtx, qEventRow, row)
 					if runErr != nil {
-						return nil, runErr
+						return nil, fmt.Errorf("row %d run: %w", i+j, runErr)
 					}
-					summary, consumeErr := res.Consume(rowCtx)
+					summary, consumeErr := res.Consume(chunkCtx)
 					if consumeErr != nil {
-						return nil, consumeErr
+						return nil, fmt.Errorf("row %d consume: %w", i+j, consumeErr)
 					}
 					n, r := summaryCreatedCounts(summary)
-					return [2]int{n, r}, nil
-				})
-				rowCancel()
-				if rowErr != nil {
-					return done, fmt.Errorf("apply event batch [%d:%d] (row fallback failed at %d): %w", i, end, i+j, rowErr)
+					localNodes += n
+					localEdges += r
 				}
-				if counts, ok := rowResAny.([2]int); ok {
-					nodesCreated += counts[0]
-					relationshipsCreated += counts[1]
-				}
-				done++
-				if progress != nil {
-					progress(done, total, fmt.Sprintf("nodes=%d edges=%d", nodesCreated, relationshipsCreated))
-				}
+				return [2]int{localNodes, localEdges}, nil
+			})
+			chunkCancel()
+			if chunkErr != nil {
+				return done, fmt.Errorf("apply event batch [%d:%d] (row fallback txn failed): %w", i, end, chunkErr)
+			}
+			if counts, ok := chunkResAny.([2]int); ok {
+				nodesCreated += counts[0]
+				relationshipsCreated += counts[1]
+			}
+			done += len(rows)
+			if progress != nil {
+				progress(done, total, fmt.Sprintf("nodes=%d edges=%d", nodesCreated, relationshipsCreated))
 			}
 			continue
 		}
@@ -461,4 +471,10 @@ func summaryCreatedCounts(summary neo4j.ResultSummary) (int, int) {
 		return 0, 0
 	}
 	return counters.NodesCreated(), counters.RelationshipsCreated()
+}
+
+func logFallbackQueryError(stage string, runErr error, failedQuery, fallbackQuery string) {
+	_, _ = fmt.Fprintf(os.Stderr, "\n[g2g][apply_nornic][fallback] stage=%s reason=%v\n", stage, runErr)
+	_, _ = fmt.Fprintf(os.Stderr, "[g2g][apply_nornic][fallback] failed_unwind_query:\n%s\n", failedQuery)
+	_, _ = fmt.Fprintf(os.Stderr, "[g2g][apply_nornic][fallback] fallback_row_query:\n%s\n", fallbackQuery)
 }

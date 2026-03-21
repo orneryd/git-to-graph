@@ -23,11 +23,15 @@ type Symbol struct {
 	Kind     string
 	FilePath string
 	Language string
+	Line     int
 }
 
 type CallEdge struct {
-	Caller string
-	Callee string
+	Caller   string
+	Callee   string
+	Line     int
+	Args     []string
+	FullName string
 }
 
 type FileGraph struct {

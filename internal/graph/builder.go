@@ -3,13 +3,56 @@ package graph
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/c815719/git-to-graph/internal/model"
 )
 
 func BuildFacts(repoID string, files map[string]model.FileGraph, callTargets map[string]string) map[string]string {
 	facts := map[string]string{}
+	facts[factKey("repository", repoID)] = mustJSON(map[string]any{
+		"name": repoID,
+	})
+
+	directorySet := map[string]struct{}{}
+	for path := range files {
+		dir := filepath.Clean(filepath.Dir(path))
+		for dir != "." && dir != string(filepath.Separator) {
+			directorySet[dir] = struct{}{}
+			next := filepath.Dir(dir)
+			if next == dir {
+				break
+			}
+			dir = next
+		}
+	}
+	for dir := range directorySet {
+		facts[factKey("directory", dir)] = mustJSON(map[string]any{
+			"repo": repoID,
+			"path": dir,
+			"name": filepath.Base(dir),
+		})
+		parent := filepath.Dir(dir)
+		if parent == "." || parent == string(filepath.Separator) || parent == dir {
+			facts[factKey("contains", repoID+"->"+dir)] = mustJSON(map[string]any{
+				"repo":        repoID,
+				"source":      repoID,
+				"source_type": "repository",
+				"target":      dir,
+				"target_type": "directory",
+			})
+		} else {
+			facts[factKey("contains", parent+"->"+dir)] = mustJSON(map[string]any{
+				"repo":        repoID,
+				"source":      parent,
+				"source_type": "directory",
+				"target":      dir,
+				"target_type": "directory",
+			})
+		}
+	}
 	localCallable := map[string]map[string]string{}
 	for path, fg := range files {
 		byName := map[string]string{}
@@ -31,29 +74,59 @@ func BuildFacts(repoID string, files map[string]model.FileGraph, callTargets map
 			"repo": repoID,
 			"path": path,
 			"lang": fg.Lang,
+			"name": filepath.Base(path),
 		})
+		dir := filepath.Clean(filepath.Dir(path))
+		if dir != "." && dir != string(filepath.Separator) {
+			facts[factKey("contains", dir+"->"+path)] = mustJSON(map[string]any{
+				"repo":        repoID,
+				"source":      dir,
+				"source_type": "directory",
+				"target":      path,
+				"target_type": "file",
+			})
+		} else {
+			facts[factKey("contains", repoID+"->"+path)] = mustJSON(map[string]any{
+				"repo":        repoID,
+				"source":      repoID,
+				"source_type": "repository",
+				"target":      path,
+				"target_type": "file",
+			})
+		}
 
 		for _, imp := range dedupeStrings(fg.Imports) {
-			facts[factKey("import", path+"->"+imp)] = mustJSON(map[string]any{
-				"repo":   repoID,
-				"from":   path,
-				"import": imp,
+			facts[factKey("module", imp)] = mustJSON(map[string]any{
+				"repo": repoID,
+				"name": imp,
+			})
+			facts[factKey("imports", path+"->"+imp)] = mustJSON(map[string]any{
+				"repo":          repoID,
+				"source":        path,
+				"source_type":   "file",
+				"target":        imp,
+				"target_type":   "module",
+				"imported_name": imp,
 			})
 		}
 
 		for _, sym := range fg.Symbols {
-			facts[factKey("symbol", sym.ID)] = mustJSON(map[string]any{
-				"repo": repoID,
-				"id":   sym.ID,
-				"name": sym.Name,
-				"kind": sym.Kind,
-				"file": sym.FilePath,
-				"lang": sym.Language,
+			symbolPredicate := symbolPredicate(sym.Kind)
+			facts[factKey(symbolPredicate, sym.ID)] = mustJSON(map[string]any{
+				"repo":        repoID,
+				"id":          sym.ID,
+				"name":        sym.Name,
+				"kind":        sym.Kind,
+				"file":        sym.FilePath,
+				"lang":        sym.Language,
+				"line_number": sym.Line,
 			})
 			facts[factKey("contains", path+"->"+sym.ID)] = mustJSON(map[string]any{
-				"repo":   repoID,
-				"source": path,
-				"target": sym.ID,
+				"repo":        repoID,
+				"source":      path,
+				"source_type": "file",
+				"target":      sym.ID,
+				"target_type": "symbol",
 			})
 		}
 
@@ -67,9 +140,12 @@ func BuildFacts(repoID string, files map[string]model.FileGraph, callTargets map
 				}
 			}
 			facts[factKey("calls", call.Caller+"->"+calleeID)] = mustJSON(map[string]any{
-				"repo":   repoID,
-				"source": call.Caller,
-				"target": calleeID,
+				"repo":           repoID,
+				"source":         call.Caller,
+				"target":         calleeID,
+				"line_number":    call.Line,
+				"args":           call.Args,
+				"full_call_name": strings.TrimSpace(call.FullName),
 			})
 		}
 	}
@@ -103,6 +179,15 @@ func isCallableKind(kind string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func symbolPredicate(kind string) string {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "function", "method", "class", "interface", "trait", "macro", "struct", "enum", "union", "record", "property", "annotation", "variable", "constant", "type":
+		return strings.ToLower(strings.TrimSpace(kind))
+	default:
+		return "symbol"
 	}
 }
 

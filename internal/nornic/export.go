@@ -61,7 +61,7 @@ func writeVersionBatches(path string, versions []ledger.CodeState, batch int) er
 		// Keep MERGE patterns as plain literal key/value lookups for parser compatibility.
 		fmt.Fprintf(w, "MERGE (:CodeState:%s {state_id: '%s'}) SET code_key = '%s', tx_id = '%s', commit_hash = '%s', valid_from_iso = '%s', valid_from = datetime('%s'), value_json = '%s', valid_to = %s, asserted_at = datetime('%s'), asserted_by = '%s', semantic_type = '%s';\n",
 			esc(versionLabel),
-			esc(stateID), esc(v.CodeKey), esc(v.TxID), esc(v.CommitHash), validFromISO, validFromISO, esc(v.ValueJSON), validToExpr, v.AssertedAt.UTC().Format("2006-01-02T15:04:05Z"), esc(v.AssertedBy), esc(versionLabel))
+			esc(stateID), esc(v.CodeKey), esc(v.TxID), esc(v.CommitHash), validFromISO, validFromISO, esc(v.ValueJSON), validToExpr, v.AssertedAt.UTC().Format("2006-01-02T15:04:05Z"), esc(v.AssertedBy), esc(predicate))
 		fmt.Fprintf(w, "MATCH (ck:CodeKey {entity_id: '%s', relation_type: '%s'}) MATCH (cs:CodeState {state_id: '%s'}) MERGE (ck)-[:HAS_STATE]->(cs);\n",
 			esc(subjectID), esc(predicate), esc(stateID))
 		fmt.Fprintf(w, "MERGE (:Commit {hash: '%s'}) SET timestamp = datetime('%s'), tx_id = '%s', actor = '%s';\n",
@@ -139,8 +139,44 @@ func factKeyParts(factKey string) (subjectID, predicate string) {
 
 func semanticLabels(predicate, valueJSON string) (keyLabel, versionLabel string) {
 	switch strings.ToLower(strings.TrimSpace(predicate)) {
+	case "repository":
+		return "RepositoryKey", "RepositoryState"
+	case "directory":
+		return "DirectoryKey", "DirectoryState"
+	case "module":
+		return "ModuleKey", "ModuleState"
 	case "file":
 		return "CodeFileKey", "CodeFileState"
+	case "function":
+		return "CodeFunctionKey", "FunctionSymbolState"
+	case "method":
+		return "CodeMethodKey", "MethodSymbolState"
+	case "class":
+		return "CodeClassKey", "ClassSymbolState"
+	case "interface":
+		return "CodeInterfaceKey", "InterfaceSymbolState"
+	case "trait":
+		return "CodeTraitKey", "TraitSymbolState"
+	case "macro":
+		return "CodeMacroKey", "MacroSymbolState"
+	case "struct":
+		return "CodeStructKey", "StructSymbolState"
+	case "enum":
+		return "CodeEnumKey", "EnumSymbolState"
+	case "union":
+		return "CodeUnionKey", "UnionSymbolState"
+	case "record":
+		return "CodeRecordKey", "RecordSymbolState"
+	case "property":
+		return "CodePropertyKey", "PropertySymbolState"
+	case "annotation":
+		return "CodeAnnotationKey", "AnnotationSymbolState"
+	case "variable":
+		return "CodeVariableKey", "VariableSymbolState"
+	case "constant":
+		return "CodeConstantKey", "ConstantSymbolState"
+	case "type":
+		return "CodeTypeKey", "TypeSymbolState"
 	case "symbol":
 		switch strings.ToLower(strings.TrimSpace(symbolKindFromValue(valueJSON))) {
 		case "function":
@@ -162,7 +198,7 @@ func semanticLabels(predicate, valueJSON string) (keyLabel, versionLabel string)
 		return "CallEdgeKey", "CallEdgeState"
 	case "contains":
 		return "ContainsEdgeKey", "ContainsEdgeState"
-	case "import":
+	case "imports", "import":
 		return "ImportEdgeKey", "ImportEdgeState"
 	case "inherits":
 		return "InheritsEdgeKey", "InheritsEdgeState"

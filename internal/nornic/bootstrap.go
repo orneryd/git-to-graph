@@ -16,6 +16,7 @@ func WriteDefaultBootstrap(path string) error {
 		"CREATE INDEX g2g_codekey_entity IF NOT EXISTS FOR (ck:CodeKey) ON (ck.entity_id);",
 		"CREATE INDEX g2g_codekey_relation_type IF NOT EXISTS FOR (ck:CodeKey) ON (ck.relation_type);",
 		"CREATE INDEX g2g_codestate_code_key IF NOT EXISTS FOR (cs:CodeState) ON (cs.code_key);",
+		"CREATE INDEX g2g_codestate_semantic_type IF NOT EXISTS FOR (cs:CodeState) ON (cs.semantic_type);",
 		"CREATE INDEX g2g_codestate_tx_id IF NOT EXISTS FOR (cs:CodeState) ON (cs.tx_id);",
 		"CREATE INDEX g2g_codestate_commit_hash IF NOT EXISTS FOR (cs:CodeState) ON (cs.commit_hash);",
 		"CREATE INDEX g2g_codestate_valid_from IF NOT EXISTS FOR (cs:CodeState) ON (cs.valid_from);",

@@ -168,7 +168,7 @@ func parseTreeSitter(path, content, lang string) (fg model.FileGraph, ok bool) {
 				if strings.Contains(t, "method") {
 					kind = "method"
 				}
-				fg.Symbols = append(fg.Symbols, model.Symbol{ID: symbolID(path, name, kind), Name: name, Kind: kind, FilePath: path, Language: lang})
+				fg.Symbols = append(fg.Symbols, model.Symbol{ID: symbolID(path, name, kind), Name: name, Kind: kind, FilePath: path, Language: lang, Line: nodeLine(n)})
 			}
 		case "class_declaration", "class_definition":
 			name := nodeFieldText(n, "name", []byte(content))
@@ -176,20 +176,20 @@ func parseTreeSitter(path, content, lang string) (fg model.FileGraph, ok bool) {
 				name = firstIdentifierChild(n, []byte(content))
 			}
 			if name != "" {
-				fg.Symbols = append(fg.Symbols, model.Symbol{ID: symbolID(path, name, "class"), Name: name, Kind: "class", FilePath: path, Language: lang})
+				fg.Symbols = append(fg.Symbols, model.Symbol{ID: symbolID(path, name, "class"), Name: name, Kind: "class", FilePath: path, Language: lang, Line: nodeLine(n)})
 			}
 		case "type_declaration", "type_spec":
 			name := firstIdentifierChild(n, []byte(content))
 			if name != "" {
-				fg.Symbols = append(fg.Symbols, model.Symbol{ID: symbolID(path, name, "type"), Name: name, Kind: "type", FilePath: path, Language: lang})
+				fg.Symbols = append(fg.Symbols, model.Symbol{ID: symbolID(path, name, "type"), Name: name, Kind: "type", FilePath: path, Language: lang, Line: nodeLine(n)})
 			}
 		case "const_declaration", "const_spec", "constant_declaration":
 			for _, name := range identifierChildren(n, []byte(content)) {
-				fg.Symbols = append(fg.Symbols, model.Symbol{ID: symbolID(path, name, "constant"), Name: name, Kind: "constant", FilePath: path, Language: lang})
+				fg.Symbols = append(fg.Symbols, model.Symbol{ID: symbolID(path, name, "constant"), Name: name, Kind: "constant", FilePath: path, Language: lang, Line: nodeLine(n)})
 			}
 		case "var_declaration", "var_spec", "variable_declaration", "lexical_declaration":
 			for _, name := range identifierChildren(n, []byte(content)) {
-				fg.Symbols = append(fg.Symbols, model.Symbol{ID: symbolID(path, name, "variable"), Name: name, Kind: "variable", FilePath: path, Language: lang})
+				fg.Symbols = append(fg.Symbols, model.Symbol{ID: symbolID(path, name, "variable"), Name: name, Kind: "variable", FilePath: path, Language: lang, Line: nodeLine(n)})
 			}
 		case "import_declaration", "import_statement":
 			v := strings.TrimSpace(nodeText(n, []byte(content)))
@@ -225,7 +225,7 @@ func parseRegex(path, content, lang string) model.FileGraph {
 		if _, skip := keywordCalls[name]; skip {
 			continue
 		}
-		fg.Calls = append(fg.Calls, model.CallEdge{Caller: "file::" + path, Callee: name})
+		fg.Calls = append(fg.Calls, model.CallEdge{Caller: "file::" + path, Callee: name, FullName: name})
 	}
 	return fg
 }
@@ -307,14 +307,22 @@ func collectCallsWithScope(n *sitter.Node, src []byte, path, caller string, out 
 			nextCaller = symbolID(path, name, kind)
 		}
 	case "call_expression", "invocation_expression":
-		callee := nodeFieldText(n, "function", src)
+		fullCallee := nodeFieldText(n, "function", src)
+		callee := fullCallee
 		if callee == "" {
 			callee = firstIdentifierChild(n, src)
+			fullCallee = callee
 		}
 		callee = normalizeCall(callee)
 		if callee != "" {
 			if _, skip := keywordCalls[callee]; !skip {
-				*out = append(*out, model.CallEdge{Caller: nextCaller, Callee: callee})
+				*out = append(*out, model.CallEdge{
+					Caller:   nextCaller,
+					Callee:   callee,
+					Line:     nodeLine(n),
+					Args:     callArgIdentifiers(n, src),
+					FullName: strings.TrimSpace(fullCallee),
+				})
 			}
 		}
 	}
@@ -336,6 +344,21 @@ func normalizeCall(v string) string {
 	v = strings.TrimSpace(v)
 	v = strings.TrimSuffix(v, "(")
 	return v
+}
+
+func nodeLine(n *sitter.Node) int {
+	if n == nil {
+		return 0
+	}
+	return int(n.StartPoint().Row) + 1
+}
+
+func callArgIdentifiers(n *sitter.Node, src []byte) []string {
+	args := n.ChildByFieldName("arguments")
+	if args == nil {
+		return nil
+	}
+	return identifierChildren(args, src)
 }
 
 func detectLanguage(path string) string {
