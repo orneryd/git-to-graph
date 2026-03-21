@@ -201,9 +201,12 @@ func (i *Indexer) Run() error {
 				Database:        i.cfg.DBDatabase,
 				ContinueOnError: i.cfg.ContinueOnDBError,
 			})
-			count, err = nornic.ApplyCypherFiles(context.Background(), client, cypherFiles, func(done, total int, _ string) {
+			count, err = nornic.ApplyCypherFiles(context.Background(), client, cypherFiles, func(done, total int, detail string) {
 				if total > 0 {
-					reporter.Tick(fmt.Sprintf("%d/%d", done, total))
+					if strings.TrimSpace(detail) == "" {
+						detail = fmt.Sprintf("%d/%d", done, total)
+					}
+					reporter.Progress(done, detail)
 				}
 			})
 		} else {
@@ -221,14 +224,13 @@ func (i *Indexer) Run() error {
 				ContinueOnError: i.cfg.ContinueOnDBError,
 			}, bootstrapFiles, func(done, total int, _ string) {
 				if total > 0 {
-					reporter.Tick(fmt.Sprintf("%d/%d", done, total))
+					reporter.Progress(done, fmt.Sprintf("%d/%d", done, total))
 				}
 			})
 			if berr != nil {
 				return berr
 			}
-			reporter.Tick(fmt.Sprintf("statements=%d", bootstrapCount))
-			reporter.Complete("nornic bootstrap complete")
+			reporter.Complete(fmt.Sprintf("nornic bootstrap complete (statements=%d)", bootstrapCount))
 
 			boltTotal := len(led.CodeStates()) + len(led.CodeChanges())
 			if boltTotal <= 0 {
@@ -242,17 +244,19 @@ func (i *Indexer) Run() error {
 				Token:           i.cfg.DBToken,
 				Database:        i.cfg.DBDatabase,
 				ContinueOnError: i.cfg.ContinueOnDBError,
-			}, led.CodeStates(), led.CodeChanges(), func(done, total int, _ string) {
+			}, led.CodeStates(), led.CodeChanges(), func(done, total int, detail string) {
 				if total > 0 {
-					reporter.Tick(fmt.Sprintf("%d/%d", done, total))
+					if strings.TrimSpace(detail) == "" {
+						detail = fmt.Sprintf("%d/%d", done, total)
+					}
+					reporter.Progress(done, detail)
 				}
 			})
 		}
 		if err != nil {
 			return err
 		}
-		reporter.Tick(fmt.Sprintf("statements=%d", count))
-		reporter.Complete("nornic apply complete")
+		reporter.Complete(fmt.Sprintf("nornic apply complete (statements=%d)", count))
 	}
 
 	reporter.Info("Summary:")

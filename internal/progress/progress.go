@@ -41,6 +41,17 @@ func (r *Reporter) Tick(detail string) {
 	r.flushLocked()
 }
 
+func (r *Reporter) Progress(current int, detail string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if current < 0 {
+		current = 0
+	}
+	r.current = current
+	r.detail = detail
+	r.flushLocked()
+}
+
 func (r *Reporter) Complete(summary string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
