@@ -133,37 +133,40 @@ MERGE (c)-[:TOUCHED]->(ck)`
 		cancel()
 		if err != nil {
 			// Fallback: some Nornic builds reject this UNWIND mutation shape.
+			// Execute each row in its own transaction to avoid intra-txn conflicts
+			// on shared CodeKey nodes.
 			logFallbackQueryError("versions", err, qVersions, qVersionRow)
-			chunkCtx, chunkCancel := context.WithTimeout(ctx, timeout)
-			chunkResAny, chunkErr := session.ExecuteWrite(chunkCtx, func(tx neo4j.ManagedTransaction) (any, error) {
-				localNodes := 0
-				localEdges := 0
-				for j, row := range rows {
-					res, runErr := tx.Run(chunkCtx, qVersionRow, row)
+			var fallbackErr error
+			for j, row := range rows {
+				rowCtx, rowCancel := context.WithTimeout(ctx, timeout)
+				resAny, rowErr := session.ExecuteWrite(rowCtx, func(tx neo4j.ManagedTransaction) (any, error) {
+					res, runErr := tx.Run(rowCtx, qVersionRow, row)
 					if runErr != nil {
-						return nil, fmt.Errorf("row %d run: %w", i+j, runErr)
+						return nil, runErr
 					}
-					summary, consumeErr := res.Consume(chunkCtx)
+					summary, consumeErr := res.Consume(rowCtx)
 					if consumeErr != nil {
-						return nil, fmt.Errorf("row %d consume: %w", i+j, consumeErr)
+						return nil, consumeErr
 					}
 					n, r := summaryCreatedCounts(summary)
-					localNodes += n
-					localEdges += r
+					return [2]int{n, r}, nil
+				})
+				rowCancel()
+				if rowErr != nil {
+					fallbackErr = fmt.Errorf("apply version row %d (row fallback txn failed): %w", i+j, rowErr)
+					break
 				}
-				return [2]int{localNodes, localEdges}, nil
-			})
-			chunkCancel()
-			if chunkErr != nil {
-				return done, fmt.Errorf("apply version batch [%d:%d] (row fallback txn failed): %w", i, end, chunkErr)
+				if counts, ok := resAny.([2]int); ok {
+					nodesCreated += counts[0]
+					relationshipsCreated += counts[1]
+				}
+				done++
+				if progress != nil {
+					progress(done, total, fmt.Sprintf("nodes=%d edges=%d", nodesCreated, relationshipsCreated))
+				}
 			}
-			if counts, ok := chunkResAny.([2]int); ok {
-				nodesCreated += counts[0]
-				relationshipsCreated += counts[1]
-			}
-			done += len(rows)
-			if progress != nil {
-				progress(done, total, fmt.Sprintf("nodes=%d edges=%d", nodesCreated, relationshipsCreated))
+			if fallbackErr != nil {
+				return done, fallbackErr
 			}
 			continue
 		}
@@ -246,37 +249,40 @@ MERGE (cc)-[:IMPACTS]->(cs)`
 		cancel()
 		if err != nil {
 			// Fallback: execute event upserts row-by-row when UNWIND mutation is rejected.
+			// Each row gets its own transaction to avoid intra-txn conflicts on shared
+			// Commit nodes.
 			logFallbackQueryError("events", err, qEvents, qEventRow)
-			chunkCtx, chunkCancel := context.WithTimeout(ctx, timeout)
-			chunkResAny, chunkErr := session.ExecuteWrite(chunkCtx, func(tx neo4j.ManagedTransaction) (any, error) {
-				localNodes := 0
-				localEdges := 0
-				for j, row := range rows {
-					res, runErr := tx.Run(chunkCtx, qEventRow, row)
+			var fallbackErr error
+			for j, row := range rows {
+				rowCtx, rowCancel := context.WithTimeout(ctx, timeout)
+				resAny, rowErr := session.ExecuteWrite(rowCtx, func(tx neo4j.ManagedTransaction) (any, error) {
+					res, runErr := tx.Run(rowCtx, qEventRow, row)
 					if runErr != nil {
-						return nil, fmt.Errorf("row %d run: %w", i+j, runErr)
+						return nil, runErr
 					}
-					summary, consumeErr := res.Consume(chunkCtx)
+					summary, consumeErr := res.Consume(rowCtx)
 					if consumeErr != nil {
-						return nil, fmt.Errorf("row %d consume: %w", i+j, consumeErr)
+						return nil, consumeErr
 					}
 					n, r := summaryCreatedCounts(summary)
-					localNodes += n
-					localEdges += r
+					return [2]int{n, r}, nil
+				})
+				rowCancel()
+				if rowErr != nil {
+					fallbackErr = fmt.Errorf("apply event row %d (row fallback txn failed): %w", i+j, rowErr)
+					break
 				}
-				return [2]int{localNodes, localEdges}, nil
-			})
-			chunkCancel()
-			if chunkErr != nil {
-				return done, fmt.Errorf("apply event batch [%d:%d] (row fallback txn failed): %w", i, end, chunkErr)
+				if counts, ok := resAny.([2]int); ok {
+					nodesCreated += counts[0]
+					relationshipsCreated += counts[1]
+				}
+				done++
+				if progress != nil {
+					progress(done, total, fmt.Sprintf("nodes=%d edges=%d", nodesCreated, relationshipsCreated))
+				}
 			}
-			if counts, ok := chunkResAny.([2]int); ok {
-				nodesCreated += counts[0]
-				relationshipsCreated += counts[1]
-			}
-			done += len(rows)
-			if progress != nil {
-				progress(done, total, fmt.Sprintf("nodes=%d edges=%d", nodesCreated, relationshipsCreated))
+			if fallbackErr != nil {
+				return done, fallbackErr
 			}
 			continue
 		}
