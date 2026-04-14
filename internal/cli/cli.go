@@ -34,6 +34,11 @@ func Run(args []string, stdout, stderr io.Writer) error {
 }
 
 func runIndex(args []string, stdout io.Writer) error {
+	// Reorder args so positional arguments come after flags.
+	// Go's flag package stops parsing at the first non-flag argument,
+	// so "g2g index . --from HEAD" would treat --from as unparsed.
+	args = movePositionalToEnd(args)
+
 	fs := flag.NewFlagSet("index", flag.ContinueOnError)
 	outDir := fs.String("out", "./.git2graph", "Output directory for ledger artifacts")
 	batchSize := fs.Int("batch-size", 500, "NornicDB write batch size")
@@ -127,6 +132,24 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  index    Read git history and build canonical temporal ledger artifacts")
 	fmt.Fprintln(w, "  asof     Reconstruct graph state from ledger as of a timestamp")
+}
+
+// movePositionalToEnd moves any leading non-flag arguments to the end
+// of the arg list. Go's flag package stops parsing at the first non-flag
+// argument, so "g2g index . --from HEAD" would leave --from unparsed.
+// This reorders it to "--from HEAD ." so flags are parsed correctly.
+func movePositionalToEnd(args []string) []string {
+	i := 0
+	for i < len(args) && !strings.HasPrefix(args[i], "-") {
+		i++
+	}
+	if i == 0 || i == len(args) {
+		return args
+	}
+	reordered := make([]string, 0, len(args))
+	reordered = append(reordered, args[i:]...)
+	reordered = append(reordered, args[:i]...)
+	return reordered
 }
 
 func isBoltURI(v string) bool {
