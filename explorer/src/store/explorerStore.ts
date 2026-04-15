@@ -3,9 +3,9 @@ import { executeCypher } from "../api/client";
 import {
   callEdgesForSymbolsAtTimestampQuery,
   changedAtCommitQuery,
-  containmentEdgesAtTimestampQuery,
-  directoriesAtTimestampQuery,
-  filesAtTimestampQuery,
+  containmentEdgesForRepoQuery,
+  directoriesForRepoQuery,
+  filesForRepoQuery,
   importEdgesForFileAtTimestampQuery,
   listCommitsQuery,
   listRepositoriesQuery,
@@ -37,6 +37,13 @@ export interface ExplorerEdge {
   source: string;
   target: string;
   type: string;
+}
+
+interface ProjectStateRow {
+  id: string;
+  key: string;
+  value: unknown;
+  commitHash: string;
 }
 
 interface ExplorerState {
@@ -116,20 +123,73 @@ function reduceGraphIfLarge(
 }
 
 async function loadProjectGraph(
-  timestamp: string,
   selectedRepo: string,
   database: string,
+  currentCommitIndex: number,
+  commits: CommitItem[],
 ): Promise<{ nodes: ExplorerNode[]; edges: ExplorerEdge[] }> {
+  const repoNeedle = `"repo":"${selectedRepo}"`;
   const [filesRes, dirsRes, containsRes] = await Promise.all([
-    executeCypher(filesAtTimestampQuery(), { timestamp }, database),
-    executeCypher(directoriesAtTimestampQuery(), { timestamp }, database),
-    executeCypher(containmentEdgesAtTimestampQuery(), { timestamp }, database),
+    executeCypher(filesForRepoQuery(), { repoNeedle }, database),
+    executeCypher(directoriesForRepoQuery(), { repoNeedle }, database),
+    executeCypher(containmentEdgesForRepoQuery(), { repoNeedle }, database),
   ]);
+
+  const commitIndexByHash = new Map<string, number>(
+    commits.map((commit, index) => [commit.hash, index]),
+  );
+
+  const latestRowsForKey = (rows: ProjectStateRow[]): ProjectStateRow[] => {
+    const latest = new Map<string, { row: ProjectStateRow; index: number }>();
+
+    for (const row of rows) {
+      if (!row.key || !row.commitHash) {
+        continue;
+      }
+
+      const commitIndex = commitIndexByHash.get(row.commitHash);
+      if (commitIndex === undefined || commitIndex > currentCommitIndex) {
+        continue;
+      }
+
+      const existing = latest.get(row.key);
+      if (!existing || commitIndex >= existing.index) {
+        latest.set(row.key, { row, index: commitIndex });
+      }
+    }
+
+    return Array.from(latest.values()).map((item) => item.row);
+  };
+
+  const fileRows = latestRowsForKey(
+    (filesRes.results[0]?.data ?? []).map((item) => ({
+      id: asString(item.row[0]) ?? "",
+      key: asString(item.row[1]) ?? "",
+      value: item.row[2],
+      commitHash: asString(item.row[3]) ?? "",
+    })),
+  );
+  const dirRows = latestRowsForKey(
+    (dirsRes.results[0]?.data ?? []).map((item) => ({
+      id: asString(item.row[0]) ?? "",
+      key: asString(item.row[1]) ?? "",
+      value: item.row[2],
+      commitHash: asString(item.row[3]) ?? "",
+    })),
+  );
+  const containsRows = latestRowsForKey(
+    (containsRes.results[0]?.data ?? []).map((item) => ({
+      id: asString(item.row[0]) ?? "",
+      key: asString(item.row[1]) ?? "",
+      value: item.row[2],
+      commitHash: asString(item.row[3]) ?? "",
+    })),
+  );
 
   const nodesMap = new Map<string, ExplorerNode>();
 
-  const addNode = (row: unknown[], kind: "file" | "directory"): void => {
-    const parsed = parseValue(row[2]);
+  const addNode = (row: ProjectStateRow, kind: "file" | "directory"): void => {
+    const parsed = parseValue(row.value);
     if (
       selectedRepo &&
       asString(parsed.repo) &&
@@ -137,21 +197,19 @@ async function loadProjectGraph(
     ) {
       return;
     }
-    const id = extractPathOrId(parsed) ?? asString(row[1]) ?? asString(row[0]);
+    const id = extractPathOrId(parsed) ?? row.key ?? row.id;
     if (!id) return;
     const label = asString(parsed.name) ?? asString(parsed.path) ?? id;
     const lang = asString(parsed.lang) ?? undefined;
     nodesMap.set(id, { id, label, kind, lang, properties: parsed });
   };
 
-  for (const row of filesRes.results[0]?.data.map((d) => d.row) ?? [])
-    addNode(row, "file");
-  for (const row of dirsRes.results[0]?.data.map((d) => d.row) ?? [])
-    addNode(row, "directory");
+  for (const row of fileRows) addNode(row, "file");
+  for (const row of dirRows) addNode(row, "directory");
 
   const edges: ExplorerEdge[] = [];
-  for (const row of containsRes.results[0]?.data.map((d) => d.row) ?? []) {
-    const parsed = parseValue(row[2]);
+  for (const row of containsRows) {
+    const parsed = parseValue(row.value);
     if (
       selectedRepo &&
       asString(parsed.repo) &&
@@ -161,7 +219,7 @@ async function loadProjectGraph(
     }
     const source = asString(parsed.source);
     const target = asString(parsed.target);
-    const id = asString(row[0]) ?? `${source}->${target}`;
+    const id = row.id || `${source}->${target}`;
     if (!source || !target || !nodesMap.has(source) || !nodesMap.has(target)) {
       continue;
     }
@@ -213,14 +271,21 @@ export const useExplorerStore = create<ExplorerState>((set, get) => ({
     try {
       const { database } = get();
       const res = await executeCypher(listRepositoriesQuery(), {}, database);
-      const repos = (res.results[0]?.data ?? [])
+      const reposById = new Map<string, RepoItem>();
+      for (const item of res.results[0]?.data ?? []) {
+        const id = asString(item.row[0]) ?? "";
+        const info = parseValue(item.row[1]);
+        if (!id || reposById.has(id)) {
+          continue;
+        }
+        reposById.set(id, {
+          id,
+          name: asString(info.name) ?? asString(info.repo) ?? id,
+        });
+      }
+      const repos = Array.from(reposById.values())
         .map((item) => {
-          const id = asString(item.row[0]) ?? "";
-          const info = parseValue(item.row[1]);
-          return {
-            id,
-            name: asString(info.name) ?? asString(info.repo) ?? id,
-          };
+          return item;
         })
         .filter((repo) => repo.id);
 
@@ -260,7 +325,28 @@ export const useExplorerStore = create<ExplorerState>((set, get) => ({
         }))
         .filter((c) => c.hash);
 
-      if (commits.length === 0) {
+      const repoNeedle = `"repo":"${repoId}"`;
+      const [repoFilesRes, repoDirsRes, repoContainsRes] = await Promise.all([
+        executeCypher(filesForRepoQuery(), { repoNeedle }, database),
+        executeCypher(directoriesForRepoQuery(), { repoNeedle }, database),
+        executeCypher(containmentEdgesForRepoQuery(), { repoNeedle }, database),
+      ]);
+
+      const repoCommitHashes = new Set<string>();
+      for (const result of [repoFilesRes, repoDirsRes, repoContainsRes]) {
+        for (const item of result.results[0]?.data ?? []) {
+          const commitHash = asString(item.row[3]);
+          if (commitHash) {
+            repoCommitHashes.add(commitHash);
+          }
+        }
+      }
+
+      const repoCommits = commits.filter((commit) =>
+        repoCommitHashes.has(commit.hash),
+      );
+
+      if (repoCommits.length === 0) {
         set({
           commits: [],
           nodes: [],
@@ -271,15 +357,15 @@ export const useExplorerStore = create<ExplorerState>((set, get) => ({
         return;
       }
 
-      const latestIndex = commits.length - 1;
-      const latest = commits[latestIndex];
+      const latestIndex = repoCommits.length - 1;
+      const latest = repoCommits[latestIndex];
       const [graph, changedAtCommit] = await Promise.all([
-        loadProjectGraph(latest.timestamp, repoId, database),
+        loadProjectGraph(repoId, database, latestIndex, repoCommits),
         loadChangedAtCommit(latest.hash, database),
       ]);
 
       set({
-        commits,
+        commits: repoCommits,
         currentCommitIndex: latestIndex,
         nodes: graph.nodes,
         edges: graph.edges,
@@ -317,7 +403,7 @@ export const useExplorerStore = create<ExplorerState>((set, get) => ({
     try {
       const commit = commits[index];
       const [graph, changedAtCommit] = await Promise.all([
-        loadProjectGraph(commit.timestamp, selectedRepo, database),
+        loadProjectGraph(selectedRepo, database, index, commits),
         loadChangedAtCommit(commit.hash, database),
       ]);
       set({
@@ -470,9 +556,10 @@ export const useExplorerStore = create<ExplorerState>((set, get) => ({
     });
     try {
       const graph = await loadProjectGraph(
-        commit.timestamp,
         selectedRepo,
         database,
+        currentCommitIndex,
+        commits,
       );
       set({ nodes: graph.nodes, edges: graph.edges, isLoading: false });
     } catch (err) {
