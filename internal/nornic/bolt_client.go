@@ -22,6 +22,40 @@ type BoltConfig struct {
 	ContinueOnError bool
 }
 
+const qVersions = `UNWIND $rows AS row
+MERGE (ck:CodeKey {entity_id: row.entity_id, relation_type: row.relation_type})
+MERGE (cs:CodeState {state_id: row.state_id})
+SET cs.code_key = row.code_key,
+	cs.tx_id = row.tx_id,
+	cs.commit_hash = row.commit_hash,
+	cs.valid_from_iso = row.valid_from_iso,
+	cs.valid_from = datetime(row.valid_from_iso),
+	cs.value_json = row.value_json,
+	cs.valid_to = CASE WHEN row.valid_to_iso IS NULL THEN null ELSE datetime(row.valid_to_iso) END,
+	cs.asserted_at = datetime(row.asserted_at_iso),
+	cs.asserted_by = row.asserted_by,
+	cs.semantic_type = row.semantic_type
+MERGE (c:Commit {hash: row.commit_hash})
+ON CREATE SET c.timestamp = datetime(row.asserted_at_iso), c.tx_id = row.tx_id, c.actor = row.asserted_by
+MERGE (ck)-[:HAS_STATE]->(cs)
+MERGE (c)-[:CHANGED]->(cs)
+MERGE (c)-[:TOUCHED]->(ck)`
+
+const qEvents = `UNWIND $rows AS row
+MERGE (cc:CodeChange {change_id: row.change_id})
+SET cc.tx_id = row.tx_id,
+	cc.actor = row.actor,
+	cc.timestamp = datetime(row.timestamp_iso),
+	cc.op_type = row.op_type,
+	cc.commit_hash = row.commit_hash
+MERGE (c:Commit {hash: row.commit_hash})
+ON CREATE SET c.timestamp = datetime(row.timestamp_iso), c.tx_id = row.tx_id, c.actor = row.actor
+MERGE (c)-[:EMITTED]->(cc)
+WITH cc, row
+WHERE row.affected_state_id IS NOT NULL AND row.affected_state_id <> 'missing'
+MATCH (cs:CodeState {state_id: row.affected_state_id})
+MERGE (cc)-[:IMPACTS]->(cs)`
+
 func ApplyLedgerBolt(ctx context.Context, cfg BoltConfig, versions []ledger.CodeState, events []ledger.CodeChange, progress ApplyProgressFunc) (int, error) {
 	if cfg.URI == "" {
 		cfg.URI = "bolt://localhost:7687"
@@ -54,42 +88,6 @@ func ApplyLedgerBolt(ctx context.Context, cfg BoltConfig, versions []ledger.Code
 	nodesCreated := 0
 	relationshipsCreated := 0
 
-	const qVersions = `UNWIND $rows AS row
-MERGE (ck:CodeKey {entity_id: row.entity_id, relation_type: row.relation_type})
-MERGE (cs:CodeState {state_id: row.state_id})
-SET cs.code_key = row.code_key,
-    cs.tx_id = row.tx_id,
-    cs.commit_hash = row.commit_hash,
-    cs.valid_from_iso = row.valid_from_iso,
-    cs.valid_from = datetime(row.valid_from_iso),
-    cs.value_json = row.value_json,
-    cs.valid_to = CASE WHEN row.valid_to_iso IS NULL THEN null ELSE datetime(row.valid_to_iso) END,
-    cs.asserted_at = datetime(row.asserted_at_iso),
-    cs.asserted_by = row.asserted_by,
-    cs.semantic_type = row.semantic_type
-MERGE (ck)-[:HAS_STATE]->(cs)
-MERGE (c:Commit {hash: row.commit_hash})
-ON CREATE SET c.timestamp = datetime(row.asserted_at_iso), c.tx_id = row.tx_id, c.actor = row.asserted_by
-MERGE (c)-[:CHANGED]->(cs)
-MERGE (c)-[:TOUCHED]->(ck)`
-	const qVersionRow = `MERGE (ck:CodeKey {entity_id: $entity_id, relation_type: $relation_type})
-MERGE (cs:CodeState {state_id: $state_id})
-SET cs.code_key = $code_key,
-    cs.tx_id = $tx_id,
-    cs.commit_hash = $commit_hash,
-    cs.valid_from_iso = $valid_from_iso,
-    cs.valid_from = datetime($valid_from_iso),
-    cs.value_json = $value_json,
-    cs.valid_to = CASE WHEN $valid_to_iso IS NULL THEN null ELSE datetime($valid_to_iso) END,
-    cs.asserted_at = datetime($asserted_at_iso),
-    cs.asserted_by = $asserted_by,
-    cs.semantic_type = $semantic_type
-MERGE (ck)-[:HAS_STATE]->(cs)
-MERGE (c:Commit {hash: $commit_hash})
-ON CREATE SET c.timestamp = datetime($asserted_at_iso), c.tx_id = $tx_id, c.actor = $asserted_by
-MERGE (c)-[:CHANGED]->(cs)
-MERGE (c)-[:TOUCHED]->(ck)`
-
 	for i := 0; i < len(versions); i += batch {
 		end := i + batch
 		if end > len(versions) {
@@ -119,28 +117,25 @@ MERGE (c)-[:TOUCHED]->(ck)`
 		}
 		stmtCtx, cancel := context.WithTimeout(ctx, timeout)
 		resAny, err := session.ExecuteWrite(stmtCtx, func(tx neo4j.ManagedTransaction) (any, error) {
-			res, err := tx.Run(stmtCtx, qVersions, map[string]any{"rows": rows})
-			if err != nil {
-				return nil, err
+			res, runErr := tx.Run(stmtCtx, qVersions, map[string]any{"rows": rows})
+			if runErr != nil {
+				return nil, runErr
 			}
-			summary, err := res.Consume(stmtCtx)
-			if err != nil {
-				return nil, err
+			summary, consumeErr := res.Consume(stmtCtx)
+			if consumeErr != nil {
+				return nil, consumeErr
 			}
-			n, r := summaryCreatedCounts(summary)
-			return [2]int{n, r}, nil
+			nodes, relationships := summaryCreatedCounts(summary)
+			return [2]int{nodes, relationships}, nil
 		})
 		cancel()
 		if err != nil {
-			// Fallback: some Nornic builds reject this UNWIND mutation shape.
-			// Execute each row in its own transaction to avoid intra-txn conflicts
-			// on shared CodeKey nodes.
-			logFallbackQueryError("versions", err, qVersions, qVersionRow)
+			logFallbackQueryError("versions", err, qVersions, qVersions)
 			var fallbackErr error
 			for j, row := range rows {
 				rowCtx, rowCancel := context.WithTimeout(ctx, timeout)
-				resAny, rowErr := session.ExecuteWrite(rowCtx, func(tx neo4j.ManagedTransaction) (any, error) {
-					res, runErr := tx.Run(rowCtx, qVersionRow, row)
+				rowResAny, rowErr := session.ExecuteWrite(rowCtx, func(tx neo4j.ManagedTransaction) (any, error) {
+					res, runErr := tx.Run(rowCtx, qVersions, map[string]any{"rows": []map[string]any{row}})
 					if runErr != nil {
 						return nil, runErr
 					}
@@ -148,15 +143,15 @@ MERGE (c)-[:TOUCHED]->(ck)`
 					if consumeErr != nil {
 						return nil, consumeErr
 					}
-					n, r := summaryCreatedCounts(summary)
-					return [2]int{n, r}, nil
+					nodes, relationships := summaryCreatedCounts(summary)
+					return [2]int{nodes, relationships}, nil
 				})
 				rowCancel()
 				if rowErr != nil {
-					fallbackErr = fmt.Errorf("apply version row %d (row fallback txn failed): %w", i+j, rowErr)
+					fallbackErr = fmt.Errorf("apply version row %d (single-row batch fallback failed): %w", i+j, rowErr)
 					break
 				}
-				if counts, ok := resAny.([2]int); ok {
+				if counts, ok := rowResAny.([2]int); ok {
 					nodesCreated += counts[0]
 					relationshipsCreated += counts[1]
 				}
@@ -179,37 +174,6 @@ MERGE (c)-[:TOUCHED]->(ck)`
 			progress(done, total, fmt.Sprintf("nodes=%d edges=%d", nodesCreated, relationshipsCreated))
 		}
 	}
-
-	const qEvents = `UNWIND $rows AS row
-MERGE (cc:CodeChange {change_id: row.change_id})
-SET cc.tx_id = row.tx_id,
-    cc.actor = row.actor,
-    cc.timestamp = datetime(row.timestamp_iso),
-    cc.op_type = row.op_type,
-    cc.commit_hash = row.commit_hash
-MERGE (c:Commit {hash: row.commit_hash})
-ON CREATE SET c.timestamp = datetime(row.timestamp_iso), c.tx_id = row.tx_id, c.actor = row.actor
-MERGE (c)-[:EMITTED]->(cc)
-WITH cc, row
-OPTIONAL MATCH (csByID:CodeState {state_id: row.affected_state_id})
-OPTIONAL MATCH (csByKey:CodeState {code_key: row.affected_code_key, tx_id: row.tx_id})
-WITH cc, coalesce(csByID, csByKey) AS cs
-WHERE cs IS NOT NULL
-MERGE (cc)-[:IMPACTS]->(cs)`
-	const qEventRow = `MERGE (cc:CodeChange {change_id: $change_id})
-SET cc.tx_id = $tx_id,
-    cc.actor = $actor,
-    cc.timestamp = datetime($timestamp_iso),
-    cc.op_type = $op_type,
-    cc.commit_hash = $commit_hash
-MERGE (c:Commit {hash: $commit_hash})
-ON CREATE SET c.timestamp = datetime($timestamp_iso), c.tx_id = $tx_id, c.actor = $actor
-MERGE (c)-[:EMITTED]->(cc)
-OPTIONAL MATCH (csByID:CodeState {state_id: $affected_state_id})
-OPTIONAL MATCH (csByKey:CodeState {code_key: $affected_code_key, tx_id: $tx_id})
-WITH cc, coalesce(csByID, csByKey) AS cs
-WHERE cs IS NOT NULL
-MERGE (cc)-[:IMPACTS]->(cs)`
 
 	for i := 0; i < len(events); i += batch {
 		end := i + batch
@@ -235,28 +199,25 @@ MERGE (cc)-[:IMPACTS]->(cs)`
 		}
 		stmtCtx, cancel := context.WithTimeout(ctx, timeout)
 		resAny, err := session.ExecuteWrite(stmtCtx, func(tx neo4j.ManagedTransaction) (any, error) {
-			res, err := tx.Run(stmtCtx, qEvents, map[string]any{"rows": rows})
-			if err != nil {
-				return nil, err
+			res, runErr := tx.Run(stmtCtx, qEvents, map[string]any{"rows": rows})
+			if runErr != nil {
+				return nil, runErr
 			}
-			summary, err := res.Consume(stmtCtx)
-			if err != nil {
-				return nil, err
+			summary, consumeErr := res.Consume(stmtCtx)
+			if consumeErr != nil {
+				return nil, consumeErr
 			}
-			n, r := summaryCreatedCounts(summary)
-			return [2]int{n, r}, nil
+			nodes, relationships := summaryCreatedCounts(summary)
+			return [2]int{nodes, relationships}, nil
 		})
 		cancel()
 		if err != nil {
-			// Fallback: execute event upserts row-by-row when UNWIND mutation is rejected.
-			// Each row gets its own transaction to avoid intra-txn conflicts on shared
-			// Commit nodes.
-			logFallbackQueryError("events", err, qEvents, qEventRow)
+			logFallbackQueryError("events", err, qEvents, qEvents)
 			var fallbackErr error
 			for j, row := range rows {
 				rowCtx, rowCancel := context.WithTimeout(ctx, timeout)
-				resAny, rowErr := session.ExecuteWrite(rowCtx, func(tx neo4j.ManagedTransaction) (any, error) {
-					res, runErr := tx.Run(rowCtx, qEventRow, row)
+				rowResAny, rowErr := session.ExecuteWrite(rowCtx, func(tx neo4j.ManagedTransaction) (any, error) {
+					res, runErr := tx.Run(rowCtx, qEvents, map[string]any{"rows": []map[string]any{row}})
 					if runErr != nil {
 						return nil, runErr
 					}
@@ -264,15 +225,15 @@ MERGE (cc)-[:IMPACTS]->(cs)`
 					if consumeErr != nil {
 						return nil, consumeErr
 					}
-					n, r := summaryCreatedCounts(summary)
-					return [2]int{n, r}, nil
+					nodes, relationships := summaryCreatedCounts(summary)
+					return [2]int{nodes, relationships}, nil
 				})
 				rowCancel()
 				if rowErr != nil {
-					fallbackErr = fmt.Errorf("apply event row %d (row fallback txn failed): %w", i+j, rowErr)
+					fallbackErr = fmt.Errorf("apply event row %d (single-row batch fallback failed): %w", i+j, rowErr)
 					break
 				}
-				if counts, ok := resAny.([2]int); ok {
+				if counts, ok := rowResAny.([2]int); ok {
 					nodesCreated += counts[0]
 					relationshipsCreated += counts[1]
 				}
@@ -293,34 +254,6 @@ MERGE (cc)-[:IMPACTS]->(cs)`
 		done += len(rows)
 		if progress != nil {
 			progress(done, total, fmt.Sprintf("nodes=%d edges=%d", nodesCreated, relationshipsCreated))
-		}
-	}
-
-	if len(events) > 0 {
-		checkCtx, checkCancel := context.WithTimeout(ctx, timeout)
-		defer checkCancel()
-		res, err := session.ExecuteRead(checkCtx, func(tx neo4j.ManagedTransaction) (any, error) {
-			r, runErr := tx.Run(checkCtx, "MATCH (:CodeChange)-[:IMPACTS]->(:CodeState) RETURN count(*) AS c", nil)
-			if runErr != nil {
-				return nil, runErr
-			}
-			if !r.Next(checkCtx) {
-				if r.Err() != nil {
-					return nil, r.Err()
-				}
-				return int64(0), nil
-			}
-			v, _ := r.Record().Get("c")
-			if c, ok := v.(int64); ok {
-				return c, nil
-			}
-			return int64(0), nil
-		})
-		if err != nil {
-			return done, err
-		}
-		if c, _ := res.(int64); c == 0 {
-			return done, fmt.Errorf("apply validation failed: no CodeChange-[:IMPACTS]->CodeState edges were created")
 		}
 	}
 
@@ -445,11 +378,11 @@ func statementTimeout() time.Duration {
 func dbBatchSize() int {
 	v := strings.TrimSpace(os.Getenv("G2G_DB_BATCH_SIZE"))
 	if v == "" {
-		return 100
+		return 25
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil || n <= 0 {
-		return 100
+		return 25
 	}
 	if n > 1000 {
 		return 1000

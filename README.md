@@ -18,14 +18,36 @@ Use this when you want a queryable graph of your codebase with commit-aware evol
 
 ## Quickstart (local)
 
-### 1) Build
+### 1) Build a local binary
 
 ```bash
 go mod tidy
 go build -o g2g ./cmd/g2g
 ```
 
-### 2) Run index + apply to NornicDB
+### 2) Install the CLI
+
+Install the binary into your Go bin directory so you can run it from any folder:
+
+```bash
+go install ./cmd/g2g
+```
+
+Make sure your Go bin directory is on `PATH`.
+
+On macOS and Linux, add this to your shell profile if needed:
+
+```bash
+export PATH="$(go env GOPATH)/bin:$PATH"
+```
+
+Verify the install:
+
+```bash
+g2g --help
+```
+
+### 3) Run index + apply to NornicDB
 
 Defaults are already local-friendly:
 
@@ -36,13 +58,13 @@ Defaults are already local-friendly:
 So this is enough:
 
 ```bash
-./g2g index .
+g2g index .
 ```
 
 Equivalent explicit command:
 
 ```bash
-./g2g index . \
+g2g index . \
   --parser-backend auto \
   --db-uri bolt://localhost:7687 \
   --db-user admin \
@@ -71,13 +93,13 @@ During apply, `g2g` auto-generates and runs `g2g-bootstrap.cypher` first to crea
 ### Index current repository
 
 ```bash
-./g2g index .
+g2g index .
 ```
 
 ### Index another repository path
 
 ```bash
-./g2g index /absolute/path/to/repo
+g2g index /absolute/path/to/repo
 ```
 
 ### Export only (no DB apply)
@@ -85,13 +107,13 @@ During apply, `g2g` auto-generates and runs `g2g-bootstrap.cypher` first to crea
 Pass an empty DB URI:
 
 ```bash
-./g2g index . --db-uri "" --out ./.git2graph
+g2g index . --db-uri "" --out ./.git2graph
 ```
 
 ### Use GraphQL transport
 
 ```bash
-./g2g index . \
+g2g index . \
   --db-uri http://localhost:7474/graphql \
   --db-user admin \
   --db-password password
@@ -100,7 +122,7 @@ Pass an empty DB URI:
 ### Add your own bootstrap schema
 
 ```bash
-./g2g index . \
+g2g index . \
   --bootstrap-cypher /absolute/path/to/bootstrap.cypher
 ```
 
@@ -129,7 +151,7 @@ Artifacts:
 ## As-of snapshot
 
 ```bash
-./g2g asof \
+g2g asof \
   --ledger ./.git2graph/ledger_versions.jsonl \
   --time 2025-01-01T00:00:00Z
 ```
@@ -144,7 +166,7 @@ Environment variables:
 Example:
 
 ```bash
-G2G_DB_BATCH_SIZE=100 G2G_DB_STATEMENT_TIMEOUT_SEC=180 ./g2g index .
+G2G_DB_BATCH_SIZE=100 G2G_DB_STATEMENT_TIMEOUT_SEC=180 g2g index .
 ```
 
 ## Verify graph load quickly

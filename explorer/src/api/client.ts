@@ -41,7 +41,6 @@ const AUTH = `Basic ${btoa('admin:password')}`
 async function postJson<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
     method: 'POST',
-    credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
       Authorization: AUTH,
