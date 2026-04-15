@@ -78,7 +78,7 @@ function toIsoTimestamp(value: unknown): string {
 function safeAlert(message: string): void {
   if (typeof window !== "undefined") {
     const now = Date.now();
-    if (message === lastAlertMessage && now-lastAlertAt < 1500) {
+    if (message === lastAlertMessage && now - lastAlertAt < 1500) {
       return;
     }
     lastAlertMessage = message;
